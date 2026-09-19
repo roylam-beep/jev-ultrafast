@@ -8,11 +8,10 @@ import threading
 import time
 from pathlib import Path
 
-from browser_harness.helpers import drain_events
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from examples.flights import GOALS, URL, verify  # noqa: E402
 from jev_ultrafast import Agent  # noqa: E402
+from jev_ultrafast.events import subscribe  # noqa: E402
 
 folder = Path(sys.argv[1] if len(sys.argv) > 1 else "artifacts/flights/recorded")
 folder.mkdir(parents=True, exist_ok=False)
@@ -33,12 +32,10 @@ epoch = time.time()
 errors = []
 
 
-def capture():
+def capture(screencast):
     try:
         while not stop.is_set():
-            for event in drain_events():
-                if event["method"] != "Page.screencastFrame" or event.get("session_id") != agent.browser.session:
-                    continue
+            for event in screencast.drain():
                 p = event["params"]
                 timestamp = max(0, round((p["metadata"]["timestamp"] - epoch) * 1000))
                 (frames / f"{timestamp:06d}.jpg").write_bytes(base64.b64decode(p["data"]))
@@ -48,27 +45,34 @@ def capture():
         errors.append(str(e))
 
 
-agent.browser.call("Page.startScreencast", format="jpeg", quality=80, maxWidth=1120, maxHeight=780, everyNthFrame=2)
-worker = threading.Thread(target=capture, daemon=True)
-worker.start()
-# The first prediction starts the run timer; this anchors video timestamps to it.
-epoch = time.time()
-try:
-    for state in agent.run():
-        action = state["history"][-1]["action"] if state["history"] else ""
-        print(state["elapsed_ms"], state["status"], action, flush=True)
-finally:
-    time.sleep(0.08)  # Drain the last frame, outside the reported agent time.
-    stop.set()
-    worker.join(timeout=3)
-    agent.browser.call("Page.stopScreencast")
-    state = agent.snapshot()
-    state["final_page"] = agent.browser.observe(screenshot=False)
-    state["verification"] = verify(state["final_page"])
-    state["source_hashes"] = source_hashes
-    state["recording_errors"] = errors
-    (folder / "state.json").write_text(json.dumps(state, indent=2))
-    (folder / "session.json").write_text(json.dumps({"target": agent.browser.target, "session": agent.browser.session}))
+# Subscribed before the screencast starts, so no frame arrives unclaimed, and the
+# fan-out keeps a concurrent WAIT's network drain from taking frames off this thread.
+with subscribe(prefix="Page.screencastFrame", session=agent.browser.session) as screencast:
+    agent.browser.call("Page.startScreencast", format="jpeg", quality=80, maxWidth=1120, maxHeight=780, everyNthFrame=2)
+    worker = threading.Thread(target=capture, args=(screencast,), daemon=True)
+    worker.start()
+    # The first prediction starts the run timer; this anchors video timestamps to it.
+    epoch = time.time()
+    try:
+        for state in agent.run():
+            action = state["history"][-1]["action"] if state["history"] else ""
+            print(state["elapsed_ms"], state["status"], action, flush=True)
+    finally:
+        time.sleep(0.08)  # Drain the last frame, outside the reported agent time.
+        stop.set()
+        worker.join(timeout=3)
+        agent.browser.call("Page.stopScreencast")
+        if screencast.dropped:
+            errors.append(f"{screencast.dropped} screencast frames dropped by a stalled capture thread")
+        state = agent.snapshot()
+        state["final_page"] = agent.browser.observe(screenshot=False)
+        state["verification"] = verify(state["final_page"])
+        state["source_hashes"] = source_hashes
+        state["recording_errors"] = errors
+        (folder / "state.json").write_text(json.dumps(state, indent=2))
+        (folder / "session.json").write_text(
+            json.dumps({"target": agent.browser.target, "session": agent.browser.session})
+        )
 print(json.dumps(state["verification"], indent=2))
 print("Screencast frames", len(list(frames.glob("*.jpg"))), "errors", errors)
 if not state["verification"]["passed"]:

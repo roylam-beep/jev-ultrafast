@@ -13,7 +13,9 @@ from typing import Any
 
 import httpx
 
+from .keyboard import press
 from .model import DEFAULT_TEXT_BASE_URL, DEFAULT_TEXT_MODEL, endpoint
+from .pointer import click, scroll
 
 logger = logging.getLogger("jev_ultrafast.supervisor")
 
@@ -27,15 +29,9 @@ SETTLE_PROBE = (
 # Security Whitelists & Patterns (P0-1 Prompt Injection Protection)
 ALLOWED_ACTIONS = {"CLICK_TEXT", "PRESS_KEY", "SCROLL", "RELOAD", "HUMAN_INTERVENTION"}
 ALLOWED_KEYS = {"Escape", "Enter", "Tab", "PageDown", "PageUp", "ArrowDown", "ArrowUp"}
-VIRTUAL_KEY_CODES = {
-    "Escape": 27,
-    "Enter": 13,
-    "Tab": 9,
-    "PageDown": 34,
-    "PageUp": 33,
-    "ArrowDown": 40,
-    "ArrowUp": 38,
-}
+# Long enough for a page to react to the press before the release.
+KEY_HOLD_SECONDS = 0.05
+CLICK_HOLD_SECONDS = 0.05
 
 # Safe click patterns for recovery (dismissing modals, accepting cookies, closing banners)
 # In Python 3 \w matches Unicode word characters (including Chinese).
@@ -413,41 +409,14 @@ class GLMSupervisor:
 
         try:
             if action_type == "PRESS_KEY":
-                key = diagnosis.get("key_name", "Escape")
-                vk = VIRTUAL_KEY_CODES.get(key, 27)
-                common = {
-                    "key": key,
-                    "code": key,
-                    "windowsVirtualKeyCode": vk,
-                    "nativeVirtualKeyCode": vk,
-                }
-                browser.call(
-                    "Input.dispatchKeyEvent",
-                    type="keyDown",
-                    **common,
-                    **({"text": "\r"} if key == "Enter" else {}),
-                )
-                time.sleep(0.05)
-                browser.call("Input.dispatchKeyEvent", type="keyUp", **common)
+                press(browser, diagnosis.get("key_name", "Escape"), delay=KEY_HOLD_SECONDS)
                 _settle(browser)
                 return True
 
             elif action_type == "SCROLL":
-                raw_center = browser.evaluate("({x: window.innerWidth / 2, y: window.innerHeight / 2})")
-                if isinstance(raw_center, dict) and "x" in raw_center and "y" in raw_center:
-                    center = raw_center
-                else:
-                    center = {"x": 550, "y": 400}
-                delta = diagnosis.get("scroll_delta", 300)
-                browser.call(
-                    "Input.dispatchMouseEvent",
-                    type="mouseWheel",
-                    x=int(center["x"]),
-                    y=int(center["y"]),
-                    deltaX=0,
-                    deltaY=int(delta),
-                )
-                time.sleep(0.1)
+                # Wheels at the viewport centre, and a background target drops a CDP
+                # wheel, so this goes through the same synthetic path as the executor.
+                scroll(browser, int(diagnosis.get("scroll_delta", 300)))
                 _settle(browser)
                 return True
 
@@ -507,23 +476,7 @@ class GLMSupervisor:
                         source="resolved element text",
                     ):
                         return False
-                    browser.call(
-                        "Input.dispatchMouseEvent",
-                        type="mousePressed",
-                        x=coords["x"],
-                        y=coords["y"],
-                        button="left",
-                        clickCount=1,
-                    )
-                    time.sleep(0.05)
-                    browser.call(
-                        "Input.dispatchMouseEvent",
-                        type="mouseReleased",
-                        x=coords["x"],
-                        y=coords["y"],
-                        button="left",
-                        clickCount=1,
-                    )
+                    click(browser, coords["x"], coords["y"], delay=CLICK_HOLD_SECONDS)
                     _settle(browser)
                     return True
                 return False

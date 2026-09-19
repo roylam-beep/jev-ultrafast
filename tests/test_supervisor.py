@@ -2,11 +2,15 @@
 
 import json
 from unittest.mock import Mock, patch
+from unittest.mock import call as mock_call
 
 import httpx
 import pytest
 
+from jev_ultrafast.keyboard import key_definition
+from jev_ultrafast.pointer import click_events, scroll_expression
 from jev_ultrafast.supervisor import (
+    ALLOWED_KEYS,
     SETTLE_PROBE,
     GLMSupervisor,
     _settle,
@@ -378,63 +382,58 @@ def test_apply_recovery_keypress_with_virtual_key_code():
 
     assert supervisor.apply_recovery(mock_browser, diagnosis) is True
     assert mock_browser.call.call_count == 2
-    mock_browser.call.assert_any_call(
-        "Input.dispatchKeyEvent",
-        type="keyDown",
-        key="Escape",
-        code="Escape",
-        windowsVirtualKeyCode=27,
-        nativeVirtualKeyCode=27,
-    )
-    mock_browser.call.assert_any_call(
-        "Input.dispatchKeyEvent",
-        type="keyUp",
-        key="Escape",
-        code="Escape",
-        windowsVirtualKeyCode=27,
-        nativeVirtualKeyCode=27,
-    )
+    for event_type in ("keyDown", "keyUp"):
+        mock_browser.call.assert_any_call(
+            "Input.dispatchKeyEvent",
+            type=event_type,
+            key="Escape",
+            code="Escape",
+            windowsVirtualKeyCode=27,
+            nativeVirtualKeyCode=27,
+            modifiers=0,
+        )
     supervisor.close()
 
 
-def test_apply_recovery_scroll_dynamic_viewport():
-    supervisor = GLMSupervisor(api_key="valid-key")
+def test_every_allowed_recovery_key_has_a_definition():
+    """A key the policy allows must not dispatch as an unidentified keyCode 0."""
+    for key in ALLOWED_KEYS:
+        virtual_key, code, _text = key_definition(key)
+        assert virtual_key, key
+        assert code == key, key
+
+
+def _scroll_browser(moved=True):
     mock_browser = Mock()
     mock_browser.evaluate.side_effect = (
-        lambda expr: "complete:1000" if expr == SETTLE_PROBE else {"x": 600, "y": 450}
+        lambda expr: "complete:1000" if expr == SETTLE_PROBE else moved
     )
-
-    diagnosis = {
-        "can_auto_recover": True,
-        "action_type": "SCROLL",
-        "scroll_delta": 450,
-    }
-
-    assert supervisor.apply_recovery(mock_browser, diagnosis) is True
-    mock_browser.call.assert_called_once_with(
-        "Input.dispatchMouseEvent", type="mouseWheel", x=600, y=450, deltaX=0, deltaY=450
-    )
-    supervisor.close()
+    return mock_browser
 
 
-def test_apply_recovery_scroll_non_dict_fallback():
-    """Verify SCROLL safely falls back to default center when evaluate returns non-dict."""
+def test_apply_recovery_scroll_goes_through_the_synthetic_wheel():
+    """A CDP mouseWheel is dropped on the background target the agent owns."""
     supervisor = GLMSupervisor(api_key="valid-key")
-    mock_browser = Mock()
-    mock_browser.evaluate.side_effect = (
-        lambda expr: "complete:1000" if expr == SETTLE_PROBE else None
-    )
+    mock_browser = _scroll_browser()
 
-    diagnosis = {
-        "can_auto_recover": True,
-        "action_type": "SCROLL",
-        "scroll_delta": 300,
-    }
+    diagnosis = {"can_auto_recover": True, "action_type": "SCROLL", "scroll_delta": 450}
 
     assert supervisor.apply_recovery(mock_browser, diagnosis) is True
-    mock_browser.call.assert_called_once_with(
-        "Input.dispatchMouseEvent", type="mouseWheel", x=550, y=400, deltaX=0, deltaY=300
+    assert mock_browser.call.call_count == 0, "no Input.dispatchMouseEvent for a wheel"
+    expression = next(
+        c.args[0] for c in mock_browser.evaluate.call_args_list if c.args[0] != SETTLE_PROBE
     )
+    assert expression == scroll_expression(450)
+    assert "innerWidth / 2" in expression and "innerHeight / 2" in expression
+
+
+def test_apply_recovery_scroll_reports_true_even_when_the_page_holds_still():
+    """A page that preventDefaults the wheel is not a failed recovery action."""
+    supervisor = GLMSupervisor(api_key="valid-key")
+    assert supervisor.apply_recovery(
+        _scroll_browser(moved=False),
+        {"can_auto_recover": True, "action_type": "SCROLL", "scroll_delta": 300},
+    ) is True
     supervisor.close()
 
 
@@ -458,12 +457,11 @@ def test_apply_recovery_click_text_success():
     }
 
     assert supervisor.apply_recovery(mock_browser, diagnosis) is True
-    mock_browser.call.assert_any_call(
-        "Input.dispatchMouseEvent", type="mousePressed", x=200, y=300, button="left", clickCount=1
-    )
-    mock_browser.call.assert_any_call(
-        "Input.dispatchMouseEvent", type="mouseReleased", x=200, y=300, button="left", clickCount=1
-    )
+    press, release = click_events(200, 300)
+    assert mock_browser.call.call_args_list == [
+        mock_call("Input.dispatchMouseEvent", **press),
+        mock_call("Input.dispatchMouseEvent", **release),
+    ]
     supervisor.close()
 
 

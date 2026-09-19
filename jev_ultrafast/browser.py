@@ -2,16 +2,28 @@
 
 import hashlib
 import json
-import sys
 import time
 from pathlib import Path
 
 from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
+from .keyboard import key_events
+from .pointer import scroll_expression
+
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
+
+# Action kinds whose mutation happens inside a Runtime.evaluate, so an interrupted
+# evaluation is an uncertain execution rather than a stale read.
+MUTATING_EVALUATIONS = {"select": "Dropdown", "scroll": "Scroll"}
+
+# A WAIT costs a decision, so it is worth more than a fixed slice; it still has to
+# return well inside the loop's budget when the page never settles.
+WAIT_BUDGET = 2.0
+WAIT_IDLE_MS = 250
+
 
 class StalePage(ValueError):
     """A decision no longer refers to the observed page."""
@@ -25,12 +37,34 @@ class Browser:
         self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
         # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.
         self.call("Emulation.setFocusEmulationEnabled", enabled=True)
-        self.call("Page.navigate", url=url)
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            if self.evaluate("document.readyState") == "complete":
-                break
-            time.sleep(0.02)
+        # Events only arrive while the domain is on. Enabling once here keeps every
+        # later wait at zero extra protocol calls.
+        self.network_enabled = False
+        self.traffic = None
+        try:
+            self.call("Network.enable")
+            self.network_enabled = True
+            # Subscribed for the session, not for the wait: any consumer's pump moves the
+            # daemon's whole buffer, so a recording run's screencast thread would otherwise
+            # discard the requests that started before the WAIT decision was even made.
+            # waits imports StalePage from here, so the import is local.
+            from .waits import network_subscription
+
+            self.traffic = network_subscription(self.session)
+        except RuntimeError:
+            pass  # A bridge without the Network domain still runs; waits fall back to time.
+        try:
+            # Page.navigate returns once the navigation commits, so readyState already
+            # describes the new document. No document-identity check is needed here.
+            self.call("Page.navigate", url=url)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if self.evaluate("document.readyState") == "complete":
+                    break
+                time.sleep(0.02)
+        except Exception:
+            self.close()  # A session that never opened still owns a tab and a subscription.
+            raise
 
     def call(self, method, **params):
         return cdp(method, session_id=self.session, **params)
@@ -101,12 +135,19 @@ class Browser:
         if not self.fresh(page, action):
             raise StalePage("Page changed since this decision. Observe again.")
         if action["kind"] == "wait":
-            time.sleep(0.1)
+            # WAIT means the page is working. Return the moment it goes quiet instead
+            # of sleeping a fixed slice and spending another decision to look again.
+            from .waits import wait_for_network_idle
+
+            wait_for_network_idle(self, timeout=WAIT_BUDGET, idle_ms=WAIT_IDLE_MS)
         result = browser_operation({"operation": "act", "session": self.session, "action": action, "text": text})
         self.after_input = action if action["kind"] != "wait" else None
         return result
 
     def close(self):
+        if self.traffic:
+            self.traffic.close()
+            self.traffic = None
         if self.target:
             cdp("Target.closeTarget", targetId=self.target)
             self.target = None
@@ -131,8 +172,12 @@ def browser_operation(request):
     def evaluate(expression):
         result = call("Runtime.evaluate", expression=expression, returnByValue=True)
         if result.get("exceptionDetails"):
-            if operation == "act" and request["action"]["kind"] == "select":
-                raise RuntimeError("Dropdown execution was interrupted; inspect before retrying.")
+            # These kinds mutate inside the evaluation itself, so an interruption may
+            # land after the page already changed. Reporting it as staleness would let
+            # the loop re-predict and mutate twice, with the first never logged.
+            kind = request["action"]["kind"] if operation == "act" else None
+            if kind in MUTATING_EVALUATIONS:
+                raise RuntimeError(f"{MUTATING_EVALUATIONS[kind]} execution was interrupted; inspect before retrying.")
             raise StalePage("Document changed during evaluation")
         return result.get("result", {}).get("value")
 
@@ -140,7 +185,8 @@ def browser_operation(request):
         action = request["action"]
         kind = action["kind"]
         if kind == "scroll":
-            call("Input.dispatchMouseEvent", type="mouseWheel", x=550, y=650, deltaX=0, deltaY=action["delta"])
+            # CDP drops mouseWheel on a background target, and the agent owns one.
+            evaluate(scroll_expression(action["delta"]))
         elif kind != "wait":
             if type(action["node"]) is not int:
                 raise ValueError("Invalid observed node")
@@ -171,21 +217,10 @@ def browser_operation(request):
                 for event in ("mousePressed", "mouseReleased"):
                     call("Input.dispatchMouseEvent", type=event, x=x, y=y, button="left", clickCount=1)
                 if kind == "fill":
-                    call(
-                        "Input.dispatchKeyEvent",
-                        type="keyDown",
-                        key="a",
-                        code="KeyA",
-                        modifiers=4 if sys.platform == "darwin" else 2,
-                        commands=["selectAll"],
-                    )
-                    call(
-                        "Input.dispatchKeyEvent",
-                        type="keyUp",
-                        key="a",
-                        code="KeyA",
-                        modifiers=4 if sys.platform == "darwin" else 2,
-                    )
+                    # Replace, do not append. A page can intercept the accelerator, so
+                    # the selectAll command is what makes the selection actually happen.
+                    for event in key_events("ControlOrMeta+a"):
+                        call("Input.dispatchKeyEvent", **event)
                     call("Input.insertText", text=request["text"])
         return {"executed": action["id"]}
 
