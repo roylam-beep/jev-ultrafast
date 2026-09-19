@@ -12,6 +12,27 @@ from .questions import NEXT_ACTION, TARGET, TEXT_VALUE
 
 CLIENT = httpx.Client(http2=True, timeout=25)
 
+# The shipped configuration in .env.example. Keep these, the README, and the inspector in step.
+DEFAULT_TYPESAFE_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
+DEFAULT_TEXT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+DEFAULT_TEXT_MODEL = "glm-5.3-flash"
+
+
+class MissingFieldValue(ValueError):
+    """The text helper honoured its contract and reported it has no value for this field."""
+
+    def __init__(self, message, helper=None):
+        super().__init__(message)
+        self.helper = helper or {}
+
+
+def endpoint(raw, default=""):
+    """Every endpoint carries a bearer token, so none may come from an unvalidated setting."""
+    url = (raw or default).rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"Invalid endpoint URL scheme: {url or '(empty)'}")
+    return url
+
 
 def post_json(url, key, body):
     for attempt in range(3):
@@ -117,12 +138,10 @@ def choose(state, goal, history):
         "questions": questions,
     }
     started = time.perf_counter()
-    typesafe_endpoint = os.environ.get(
-        "TYPESAFE_ENDPOINT",
-        os.environ.get("TYPESAFE_BASE_URL", "https://api.typesafe.ai/v1/systemone"),
-    ).rstrip("/")
-    if not typesafe_endpoint.startswith(("http://", "https://")):
-        raise ValueError(f"Invalid TYPESAFE_ENDPOINT URL scheme: {typesafe_endpoint}")
+    typesafe_endpoint = endpoint(
+        os.environ.get("TYPESAFE_ENDPOINT") or os.environ.get("TYPESAFE_BASE_URL"),
+        DEFAULT_TYPESAFE_ENDPOINT,
+    )
     result = post_json(typesafe_endpoint, os.environ["TYPESAFE_API_KEY"], body)
     operation_answer = validate_choice(result["answers"].get("operation", {}), operations)
     operation = operation_answer["choice"]
@@ -168,8 +187,8 @@ def field_text(context):
     key = os.environ.get("TEXT_MODEL_API_KEY")
     if not key:
         raise ValueError("TYPE_TEXT needs TEXT_MODEL_API_KEY; no text is hardcoded or guessed by the executor.")
-    base = os.environ.get("TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
-    model = os.environ.get("TEXT_MODEL", "deepseek-chat")
+    base = endpoint(os.environ.get("TEXT_MODEL_BASE_URL"), DEFAULT_TEXT_BASE_URL)
+    model = os.environ.get("TEXT_MODEL") or DEFAULT_TEXT_MODEL
 
     host = (urlparse(base).hostname or "").lower()
     if host.endswith("openrouter.ai"):
@@ -216,15 +235,22 @@ def field_text(context):
             ],
         },
     )
-    try:
-        output = json.loads(result["choices"][0]["message"]["content"])
-        value = output["text"]
-        if set(output) != {"text"} or not isinstance(value, str) or not value.strip() or len(value) > 2000:
-            raise ValueError()
-    except (ValueError, KeyError, TypeError):
-        raise ValueError("Text helper returned no valid field value; nothing typed.") from None
-    return value, {
+    helper = {
         "model": model,
         "latency_ms": round((time.perf_counter() - started) * 1000),
         "usage": result.get("usage", {}),
     }
+    try:
+        output = json.loads(result["choices"][0]["message"]["content"])
+        if set(output) != {"text"}:
+            raise ValueError()
+        value = output["text"]
+    except (ValueError, KeyError, TypeError):
+        raise ValueError("Text helper returned no valid field value; nothing typed.") from None
+    # TEXT_VALUE asks for {"text": null} when the goal supplies no value. Honour that answer;
+    # the caller stops the run rather than typing a guess.
+    if value is None:
+        raise MissingFieldValue("Text helper reported no value for this field; nothing typed.", helper)
+    if not isinstance(value, str) or not value.strip() or len(value) > 2000:
+        raise ValueError("Text helper returned no valid field value; nothing typed.")
+    return value, helper

@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from .browser import Browser, StalePage
-from .model import action_space, choose, field_context, field_text
+from .model import MissingFieldValue, action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
 
 
@@ -110,7 +110,16 @@ class Agent:
                 if self.pending_text and self.pending_text[0] == context:
                     _, text, helper = self.pending_text
                 else:
-                    text, helper = field_text(context)
+                    try:
+                        text, helper = field_text(context)
+                    except MissingFieldValue as missing:
+                        # The helper answered per its contract: the goal supplies no value here.
+                        # No supported operation can progress, so stop instead of typing a guess.
+                        state["text_calls"].append(
+                            {**missing.helper, "field": action["label"], "value": None}
+                        )
+                        state["status"] = "blocked"
+                        return self.snapshot()
                     self.pending_text = (context, text, helper)
                     state["text_calls"].append({**helper, "field": action["label"], "value": text})
             # Browser.act checks freshness immediately before input, including after text generation.

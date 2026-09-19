@@ -6,7 +6,13 @@ from unittest.mock import Mock, patch
 import httpx
 import pytest
 
-from jev_ultrafast.supervisor import GLMSupervisor, _settle, screen_click_text, validate_recovery_action
+from jev_ultrafast.supervisor import (
+    SETTLE_PROBE,
+    GLMSupervisor,
+    _settle,
+    screen_click_text,
+    validate_recovery_action,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -395,7 +401,7 @@ def test_apply_recovery_scroll_dynamic_viewport():
     supervisor = GLMSupervisor(api_key="valid-key")
     mock_browser = Mock()
     mock_browser.evaluate.side_effect = (
-        lambda expr: "complete:1000" if "innerHTML" in expr else {"x": 600, "y": 450}
+        lambda expr: "complete:1000" if expr == SETTLE_PROBE else {"x": 600, "y": 450}
     )
 
     diagnosis = {
@@ -416,7 +422,7 @@ def test_apply_recovery_scroll_non_dict_fallback():
     supervisor = GLMSupervisor(api_key="valid-key")
     mock_browser = Mock()
     mock_browser.evaluate.side_effect = (
-        lambda expr: "complete:1000" if "innerHTML" in expr else None
+        lambda expr: "complete:1000" if expr == SETTLE_PROBE else None
     )
 
     diagnosis = {
@@ -436,7 +442,7 @@ def _click_text_browser(resolved):
     """A browser whose CLICK_TEXT resolver returns coordinates plus the element's own text."""
     mock_browser = Mock()
     mock_browser.evaluate.side_effect = (
-        lambda expr: "complete:1000" if "innerHTML" in expr else {"x": 200, "y": 300, "text": resolved}
+        lambda expr: "complete:1000" if expr == SETTLE_PROBE else {"x": 200, "y": 300, "text": resolved}
     )
     return mock_browser
 
@@ -504,7 +510,7 @@ def test_apply_recovery_click_text_rejects_missing_resolved_text():
     supervisor = GLMSupervisor(api_key="valid-key")
     mock_browser = Mock()
     mock_browser.evaluate.side_effect = (
-        lambda expr: "complete:1000" if "innerHTML" in expr else {"x": 10, "y": 10}
+        lambda expr: "complete:1000" if expr == SETTLE_PROBE else {"x": 10, "y": 10}
     )
     diagnosis = {"can_auto_recover": True, "action_type": "CLICK_TEXT", "target_text": "Close"}
     assert supervisor.apply_recovery(mock_browser, diagnosis) is False
@@ -518,7 +524,7 @@ def test_click_text_resolver_anchors_the_match():
     captured = []
 
     def evaluate(expr):
-        if "innerHTML" in expr:
+        if expr == SETTLE_PROBE:
             return "complete:1000"
         captured.append(expr)
         return None
@@ -590,6 +596,18 @@ def test_settle_helper_dom_stability():
     mock_browser.evaluate.side_effect = None
     mock_browser.evaluate.return_value = {"x": 100}
     assert _settle(mock_browser, max_timeout=0.2, interval=0.01) is False
+
+
+def test_settle_probe_does_not_serialise_the_dom():
+    """Polling innerHTML serialises megabytes per read on a real page."""
+    assert "innerHTML" not in SETTLE_PROBE
+    assert "outerHTML" not in SETTLE_PROBE
+    assert SETTLE_PROBE.index("document.readyState") < SETTLE_PROBE.index("join")
+
+    mock_browser = Mock()
+    mock_browser.evaluate.return_value = "complete:812:2400:Example"
+    assert _settle(mock_browser, max_timeout=0.5, interval=0.01) is True
+    assert {c.args[0] for c in mock_browser.evaluate.call_args_list} == {SETTLE_PROBE}
 
 
 def test_validate_recovery_action_chinese_safe_patterns():

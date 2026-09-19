@@ -65,7 +65,7 @@ Open **http://127.0.0.1:8766** and click **Start demo → Run automatically**. T
 
 Chrome connects through [Browser Harness](https://github.com/browser-use/browser-harness), installed by `uv sync`. Run `uv run browser-harness --doctor` if it needs connecting. Allow remote debugging in Chrome when prompted.
 
-`TEXT_MODEL_API_KEY` is an OpenRouter key in the example configuration. The current demo uses `inception/mercury-2.5` with reasoning disabled. Gemini, GLM, and DeepSeek can also use the OpenAI-compatible text helper; configure the appropriate model, endpoint, and reasoning setting.
+`TEXT_MODEL_API_KEY`, `TEXT_MODEL_BASE_URL`, and `TEXT_MODEL` come from [.env.example](.env.example), which ships `glm-5.3-flash` on the Zhipu open platform. Those are also the built-in defaults, so an unset `TEXT_MODEL_BASE_URL` or `TEXT_MODEL` matches the documented setup. OpenRouter, Gemini, and DeepSeek can also drive the OpenAI-compatible text helper; set the matching model, endpoint, and `TEXT_MODEL_REASONING`. Every endpoint must be `http://` or `https://` — each one carries a bearer token, so an unvalidated setting is rejected before the request.
 
 ## Use the library
 
@@ -109,7 +109,7 @@ To strictly defend against prompt injection and confused deputy attacks while re
 1. **Strict Action Whitelist**: Only `CLICK_TEXT`, `PRESS_KEY`, `SCROLL`, and `RELOAD` are accepted (`ALLOWED_ACTIONS`).
 2. **Bilingual Safe Click Patterns**: Button texts are constrained to predefined dismiss/consent patterns (`SAFE_CLICK_EN` with `\b` word boundary; `SAFE_CLICK_ZH` matching Chinese consent patterns like `同意並繼續`, `全部接受`, `我同意`).
 3. **Two-Stage Dangerous Keywords Blacklist**: Text containing `delete`, `pay`, `checkout`, `buy`, `transfer`, `logout` (and Chinese equivalents `刪除`, `付款`, `結帳`, `轉帳`, `登出`) is unconditionally rejected before pattern matching. The same screen runs **twice**: once on the label the model proposes, and again on the text of the element the DOM actually resolved. Resolution is anchored at the start of the label, so a safe prefix cannot stand in for an unsafe control (target `ok` never reaches `Book now`).
-4. **Viewport Bounds & DOM Stability**: `CLICK_TEXT` coordinates are strictly bounded within viewport dimensions (`r.top < window.innerHeight && r.left < window.innerWidth`), and `_settle` continuously monitors DOM stability before resuming the reflex loop.
+4. **Viewport Bounds & DOM Stability**: `CLICK_TEXT` coordinates are strictly bounded within viewport dimensions (`r.top < window.innerHeight && r.left < window.innerWidth`), and `_settle` polls engine-maintained counters (`readyState`, element count, scroll height, title) for DOM stability before resuming the reflex loop, without serialising the document.
 5. **Fail-Closed Outcome Verification**: Visual audits require `confidence >= 0.70` and non-`done` runs exit with deterministic non-zero codes (code 2 for loop failure, 3 for missing audit, 1 for unverified audit).
 6. **Privacy & Cost Controls**: Multimodal diagnostics transmit quality=72 JPEG screenshots to `VISION_MODEL_BASE_URL`. A maximum retry cap (`max_supervisor_retries=3`) limits session spend, and visual supervision can be completely turned off via `VISION_SUPERVISOR_ENABLED=false` for sensitive or authenticated sessions.
 
@@ -124,7 +124,7 @@ To strictly defend against prompt injection and confused deputy attacks while re
 - **Send visible text.** Offscreen article bodies and footers do not fill the model context.
 - **Reuse an interrupted text request.** A generated value survives a stale-page retry only if the entire text-helper input is unchanged.
 
-Every executed target is resolved from an observed node. The executor rechecks page freshness and click occlusion. Model output never becomes selectors, coordinates, shell commands, or executable JavaScript. Text-helper output must parse as a small JSON object before typing.
+Every executed target is resolved from an observed node. The executor rechecks page freshness and click occlusion. Model output never becomes selectors, coordinates, shell commands, or executable JavaScript. Text-helper output must parse as a small JSON object before typing. When the helper answers `{"text": null}` because the goal supplies no value, the run stops as `BLOCKED` instead of typing a guess.
 
 ## Small enough to read
 

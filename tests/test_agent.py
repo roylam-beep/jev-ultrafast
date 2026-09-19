@@ -1,6 +1,7 @@
 """Offline contracts for a dynamic operation/target policy. No paid APIs."""
 
 import json
+import os
 import time
 from copy import deepcopy
 from unittest.mock import Mock
@@ -338,13 +339,61 @@ def test_flight_verification_rejects_wrong_trip(changed):
 
 
 @pytest.mark.parametrize(
-    "content", ["Thinking: Zurich", '{"text":null}', '{"text":"Zurich","extra":true}', '{"text":123}']
+    "content", ["Thinking: Zurich", '{"text":"   "}', '{"text":"Zurich","extra":true}', '{"text":123}']
 )
 def test_text_helper_rejects_invalid_values(monkeypatch, content):
     monkeypatch.setenv("TEXT_MODEL_API_KEY", "test")
     monkeypatch.setattr(model, "post_json", Mock(return_value={"choices": [{"message": {"content": content}}]}))
     with pytest.raises(ValueError, match="nothing typed"):
         model.field_text({"goal": "Find a flight"})
+
+
+def test_documented_null_answer_is_distinguished_from_malformed_output(monkeypatch):
+    """TEXT_VALUE asks for {"text": null} when the goal supplies no value."""
+    monkeypatch.setenv("TEXT_MODEL_API_KEY", "test")
+    monkeypatch.setattr(
+        model,
+        "post_json",
+        Mock(return_value={"choices": [{"message": {"content": '{"text":null}'}}], "usage": {"total_tokens": 7}}),
+    )
+    with pytest.raises(model.MissingFieldValue) as raised:
+        model.field_text({"goal": "Find a flight"})
+    assert raised.value.helper["usage"] == {"total_tokens": 7}
+
+
+def test_missing_field_value_blocks_the_run_without_typing(runner, monkeypatch):
+    # The agent binds field_text at import time.
+    monkeypatch.setattr(
+        loop, "field_text", Mock(side_effect=model.MissingFieldValue("nothing typed", {"model": "m"}))
+    )
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "blocked"
+    runner.state["browser"].act.assert_not_called()
+    assert runner.state["history"] == []
+    assert runner.state["text_calls"] == [{"model": "m", "field": "Search", "value": None}]
+
+
+@pytest.mark.parametrize("variable", ["TYPESAFE_ENDPOINT", "TEXT_MODEL_BASE_URL"])
+def test_endpoints_reject_an_unvalidated_scheme(monkeypatch, variable):
+    """Every endpoint receives a bearer token, so none may come from an unchecked setting."""
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setenv("TEXT_MODEL_API_KEY", "test")
+    monkeypatch.setenv(variable, "file:///etc/passwd")
+    monkeypatch.setattr(model, "post_json", Mock())
+    with pytest.raises(ValueError, match="Invalid endpoint URL scheme"):
+        if variable == "TEXT_MODEL_BASE_URL":
+            model.field_text({"goal": "Find a flight"})
+        else:
+            model.choose(page(), "Find a flight", [])
+    model.post_json.assert_not_called()
+
+
+def test_empty_endpoint_setting_falls_back_to_the_default(monkeypatch):
+    monkeypatch.setenv("TEXT_MODEL_BASE_URL", "")
+    assert model.endpoint(os.environ["TEXT_MODEL_BASE_URL"], model.DEFAULT_TEXT_BASE_URL) == (
+        model.DEFAULT_TEXT_BASE_URL
+    )
+    assert model.endpoint("https://example.test/v1/", model.DEFAULT_TEXT_BASE_URL) == "https://example.test/v1"
 
 
 def test_navigation_during_prediction_reobserves_without_action(runner):

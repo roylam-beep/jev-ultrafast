@@ -13,7 +13,16 @@ from typing import Any
 
 import httpx
 
+from .model import DEFAULT_TEXT_BASE_URL, DEFAULT_TEXT_MODEL, endpoint
+
 logger = logging.getLogger("jev_ultrafast.supervisor")
+
+# Serialising document.body.innerHTML costs megabytes per poll on a real page. These counters
+# are maintained by the engine, so a settle poll stays cheap on the sites the agent targets.
+SETTLE_PROBE = (
+    "(() => [document.readyState, document.getElementsByTagName('*').length, "
+    "document.documentElement.scrollHeight, document.title].join(':'))()"
+)
 
 # Security Whitelists & Patterns (P0-1 Prompt Injection Protection)
 ALLOWED_ACTIONS = {"CLICK_TEXT", "PRESS_KEY", "SCROLL", "RELOAD", "HUMAN_INTERVENTION"}
@@ -119,10 +128,7 @@ def _settle(browser, max_timeout: float = 2.0, interval: float = 0.08) -> bool:
     end = time.perf_counter() + max_timeout
     while time.perf_counter() < end:
         try:
-            cur = browser.evaluate(
-                "(() => document.readyState + ':' + "
-                "(document.body ? document.body.innerHTML.length : 0))()"
-            )
+            cur = browser.evaluate(SETTLE_PROBE)
         except Exception as e:
             logger.warning("_settle evaluate failed: %s", e)
             return False
@@ -155,15 +161,16 @@ class GLMSupervisor:
             or os.environ.get("VISION_MODEL_API_KEY")
             or os.environ.get("TEXT_MODEL_API_KEY")
         )
-        self.base_url = (
-            base_url
-            or os.environ.get("VISION_MODEL_BASE_URL")
-            or os.environ.get("TEXT_MODEL_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
-        ).rstrip("/")
+        # Screenshots and a bearer token go to this endpoint, so validate it like the others.
+        self.base_url = endpoint(
+            base_url or os.environ.get("VISION_MODEL_BASE_URL") or os.environ.get("TEXT_MODEL_BASE_URL"),
+            DEFAULT_TEXT_BASE_URL,
+        )
         self.model = (
             model
             or os.environ.get("VISION_MODEL")
-            or os.environ.get("TEXT_MODEL", "glm-5.3-flash")
+            or os.environ.get("TEXT_MODEL")
+            or DEFAULT_TEXT_MODEL
         )
         self.client = httpx.Client(timeout=45)
 
