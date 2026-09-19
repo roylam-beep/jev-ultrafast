@@ -57,7 +57,7 @@ git clone https://github.com/browser-use/jev-ultrafast.git
 cd jev-ultrafast
 uv sync
 cp .env.example .env
-# Add TYPESAFE_API_KEY and TEXT_MODEL_API_KEY.
+# Paste one OpenRouter key into the three *_API_KEY placeholders.
 uv run jev
 ```
 
@@ -65,7 +65,19 @@ Open **http://127.0.0.1:8766** and click **Start demo → Run automatically**. T
 
 Chrome connects through [Browser Harness](https://github.com/browser-use/browser-harness), installed by `uv sync`. Run `uv run browser-harness --doctor` if it needs connecting. Allow remote debugging in Chrome when prompted.
 
-`TEXT_MODEL_API_KEY`, `TEXT_MODEL_BASE_URL`, and `TEXT_MODEL` come from [.env.example](.env.example), which ships `glm-5.3-flash` on the Zhipu open platform. Those are also the built-in defaults, so an unset `TEXT_MODEL_BASE_URL` or `TEXT_MODEL` matches the documented setup. OpenRouter, Gemini, and DeepSeek can also drive the OpenAI-compatible text helper; set the matching model, endpoint, and `TEXT_MODEL_REASONING`. Every endpoint must be `http://` or `https://` — each one carries a bearer token, so an unvalidated setting is rejected before the request.
+### Providers
+
+[.env.example](.env.example) ships one OpenRouter key driving all three models — Jev picks the operation and target, and a small chat model writes field values and audits the result — and those values are also the built-in defaults, so unset variables match the documented setup.
+
+| Variable | Job | Default |
+| --- | --- | --- |
+| `TYPESAFE_API_KEY` / `TYPESAFE_ENDPOINT` / `TYPESAFE_MODEL` | Picks the operation and target each step | `https://openrouter.ai/api/v1`, `typesafe/jev-1.13` |
+| `TEXT_MODEL_API_KEY` / `TEXT_MODEL_BASE_URL` / `TEXT_MODEL` | Writes field values for `TYPE_TEXT` | same endpoint, `zhipu/glm-5.3-flash` |
+| `VISION_MODEL_API_KEY` / `VISION_MODEL_BASE_URL` / `VISION_MODEL` | Visual supervisor, falls back to the text settings | same |
+
+The policy speaks two protocols. Against `typesafe.ai` it uses TypeSafe's constrained choice API, which returns a real probability distribution over the offered ids. Against any other endpoint it asks one OpenAI-compatible chat model to answer every question in a single JSON reply; that model reports one choice and one confidence per question, so the distribution shown in the inspector is spread from that confidence rather than measured per element. Both paths keep one request per decision cycle, and both validate every answer against the observed element ids before anything executes — a key the page never offered is rejected, not clamped. The shipped configuration runs Jev over OpenRouter, so the policy is the same model either way and only the protocol differs. Set `TYPESAFE_ENDPOINT=https://api.typesafe.ai/v1/systemone` with `TYPESAFE_MODEL=jev-latest` to reach it through the choice API and get measured per-element probabilities; the measurements below were taken on that path.
+
+OpenRouter, Zhipu, Gemini, and DeepSeek all work for the chat path; set the matching model, endpoint, and `TYPESAFE_MODEL_REASONING` / `TEXT_MODEL_REASONING`. Every endpoint must be `http://` or `https://` — each one carries a bearer token, so an unvalidated setting is rejected before the request.
 
 ## Use the library
 
@@ -91,9 +103,9 @@ uv run --env-file .env python examples/run.py \
 
 `uv run --env-file .env python examples/flights.py --keep-open` performs the flight search, checks the actual route/date/results, and saves its trace. It does not select or book a flight.
 
-### Dual-Engine Agent: Jev 1.13 + GLM-5.3-Flash
+### Dual-Engine Agent
 
-Combines Jev's sub-50ms atomic reflex loop with GLM-5.3-Flash as both a text helper and an intelligent multimodal visual supervisor:
+Combines the atomic reflex loop with a second model acting as both text helper and multimodal visual supervisor. The shipped configuration runs all three on one OpenRouter key, with Jev as System 1; set `TYPESAFE_ENDPOINT` as above to reach Jev through TypeSafe's choice API instead. The banner printed at startup names the models actually in use:
 
 ```bash
 uv run --env-file .env python examples/dual_engine_agent.py \
@@ -136,7 +148,7 @@ Every executed target is resolved from an observed node. The executor rechecks p
 | File | Job |
 | --- | --- |
 | [agent.py](jev_ultrafast/agent.py) | The complete loop and text-helper handoff |
-| [supervisor.py](jev_ultrafast/supervisor.py) | Multimodal visual diagnosis, deadlock recovery, and goal verification via GLM-5.3-Flash |
+| [supervisor.py](jev_ultrafast/supervisor.py) | Multimodal visual diagnosis, deadlock recovery, and goal verification |
 | [snapshot.js](jev_ultrafast/snapshot.js) | Atomic DOM snapshot, indexed controls, freshness guards |
 | [browser.py](jev_ultrafast/browser.py) | Browser connection, current geometry, execution |
 | [waits.py](jev_ultrafast/waits.py) | Document, network-idle, and predicate waits over the owned session |
@@ -145,7 +157,7 @@ Every executed target is resolved from an observed node. The executor rechecks p
 | [model.py](jev_ultrafast/model.py) | Dynamic operation/target heads and text generation |
 | [questions.py](jev_ultrafast/questions.py) | Model instructions |
 | [demo.py](jev_ultrafast/demo.py) | Local inspector |
-| [dual_engine_agent.py](examples/dual_engine_agent.py) | End-to-end dual-engine runner combining Jev reflex with GLM supervision |
+| [dual_engine_agent.py](examples/dual_engine_agent.py) | End-to-end dual-engine runner combining the reflex loop with visual supervision |
 
 ## Evidence and limits
 
@@ -169,7 +181,7 @@ node --check jev_ultrafast/snapshot.js
 uv build
 ```
 
-Tests are offline. `uv run python scripts/check_guards.py` checks real controls in a local browser without model calls. Live examples and recording scripts make paid API calls. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
+Tests are offline. `uv run python scripts/check_guards.py` checks real controls in a local browser without model calls. `uv run --env-file .env python scripts/probe_provider.py` goes the other way: it calls the configured policy, text, and vision endpoints once each — no browser — so a wrong key, endpoint, or model id surfaces before a live run. Live examples, the probe, and recording scripts make paid API calls. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
 
 ---
 

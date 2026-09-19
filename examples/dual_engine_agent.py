@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Dual-Engine Browser Agent Example: Jev 1.13 + GLM-5.3-Flash (Hardened Edition)
+Dual-Engine Browser Agent Example (Hardened Edition)
 
 Architecture:
-1. Fast Reflex Loop (System 1): TypeSafe Jev 1.13 executes sub-50ms atomic choices.
-2. Smart Text Helper: GLM-5.3-Flash generates structured text when TYPE_TEXT is required.
-3. Multimodal Supervisor (System 2): GLM-5.3-Flash visually diagnoses obstacles and audits goals.
+1. Fast Reflex Loop (System 1): the policy picks one operation and target per observation.
+2. Smart Text Helper: the text model generates structured text when TYPE_TEXT is required.
+3. Multimodal Supervisor (System 2): the vision model diagnoses obstacles and audits goals.
+
+Systems 1 and 2 run on whatever .env configures; the banner below prints the models in use.
+The shipped configuration puts all three on one OpenRouter key, with Jev as System 1. Point
+TYPESAFE_ENDPOINT at TypeSafe's choice API to reach Jev through its constrained protocol.
 """
 
 import argparse
@@ -15,6 +19,7 @@ import sys
 import time
 
 from jev_ultrafast import Agent, GLMSupervisor
+from jev_ultrafast.model import DEFAULT_TEXT_MODEL, DEFAULT_TYPESAFE_MODEL
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("dual_engine_agent")
@@ -31,8 +36,8 @@ def run_dual_engine(
     print("⚡ Starting Dual-Engine Ultrafast Browser Agent")
     print(f"🎯 Target URL : {url}")
     print(f"🎯 User Goal   : {goal}")
-    print(f"🤖 Action Model: {os.environ.get('TYPESAFE_MODEL', 'jev-latest')}")
-    print(f"🧠 Brain Model : {os.environ.get('TEXT_MODEL', 'glm-5.3-flash')} (Text & Vision)")
+    print(f"🤖 Action Model: {os.environ.get('TYPESAFE_MODEL') or DEFAULT_TYPESAFE_MODEL}")
+    print(f"🧠 Brain Model : {os.environ.get('TEXT_MODEL') or DEFAULT_TEXT_MODEL} (Text & Vision)")
     print(f"⏱️  Budget     : Max {max_steps} steps | Deadline {deadline_seconds}s")
     print("=" * 65)
 
