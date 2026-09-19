@@ -120,8 +120,8 @@ def check_backlog(root, fails):
     cap = int(declared.group(1)) if declared else BACKLOG_MAX_ITEMS
     # 兩種寫法都要算到：清單（`- x`／`1. x`）與表格列（`| 3 | … |`）。
     # 只認第一格是純數字的表格列，這樣表頭與分隔列（`|---|`）不會被當成項目。
-    items = [(i + 1, l) for i, l in enumerate(lines)
-             if re.match(r"\s*(-|\*|\d+\.)\s", l) or re.match(r"\s*\|\s*\d+\s*\|", l)]
+    items = [(i + 1, line) for i, line in enumerate(lines)
+             if re.match(r"\s*(-|\*|\d+\.)\s", line) or re.match(r"\s*\|\s*\d+\s*\|", line)]
     if len(items) > cap:
         src = "檔頭宣告" if declared else "本檔預設"
         fails.append(f"BACKLOG.md: {len(items)} 條 > {cap}（{src}；滿載進一出一）")
@@ -147,7 +147,9 @@ def check_rules_budget(root, fails):
         if "TODO(paths)" in text:
             fails.append(f"{rel} 仍留著 TODO(paths)——paths 沒填成本 repo 實際存在的原始碼目錄，這份規則永不載入。")
     if src_total > RULES_BUDGETS["srcScoped"]:
-        fails.append(f"src/** scoped 合計 {src_total:,} > {RULES_BUDGETS['srcScoped']:,}（{'、'.join(src_names)}）（{ADVICE}）")
+        names = "、".join(src_names)
+        fails.append(
+            f"src/** scoped 合計 {src_total:,} > {RULES_BUDGETS['srcScoped']:,}（{names}）（{ADVICE}）")
     if total > RULES_BUDGETS["rulesTotal"]:
         fails.append(f".claude/rules/** 總計 {total:,} 字 > {RULES_BUDGETS['rulesTotal']:,}（{ADVICE}）")
     return total, src_total
