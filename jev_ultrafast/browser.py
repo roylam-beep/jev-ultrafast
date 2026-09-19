@@ -9,6 +9,8 @@ from pathlib import Path
 from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
+from .events import subscribe
+
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
@@ -34,9 +36,14 @@ class Browser:
         # Events only arrive while the domain is on. Enabling once here keeps every
         # later wait at zero extra protocol calls.
         self.network_enabled = False
+        self.traffic = None
         try:
             self.call("Network.enable")
             self.network_enabled = True
+            # Subscribed for the session, not for the wait: any consumer's drain moves the
+            # daemon's whole buffer, so a recording run's screencast thread would otherwise
+            # discard the requests that started before the WAIT decision was even made.
+            self.traffic = subscribe(prefix="Network.", session=self.session)
         except RuntimeError:
             pass  # A bridge without the Network domain still runs; waits fall back to time.
         # Page.navigate returns once the navigation commits, so readyState already
@@ -127,6 +134,9 @@ class Browser:
         return result
 
     def close(self):
+        if self.traffic:
+            self.traffic.close()
+            self.traffic = None
         if self.target:
             cdp("Target.closeTarget", targetId=self.target)
             self.target = None

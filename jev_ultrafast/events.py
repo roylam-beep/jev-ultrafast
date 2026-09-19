@@ -16,11 +16,17 @@ Queues are bounded. A consumer that stops draining (a capture thread that died,
 say) would otherwise hold every screencast frame of the run in memory; instead
 its oldest events fall off and `Subscription.dropped` counts them, so the loss
 is reported rather than silent.
+
+A subscription only receives what arrives while it is open, and any consumer's
+drain moves the whole buffer. So a consumer that needs events from before its
+own work started -- an idle check counting requests that began before the WAIT
+decision, while the recorder's thread drains for frames throughout -- subscribes
+for the session, not for the wait. `Browser` does, and `wait_for_network_idle`
+drains that subscription.
 """
 
 import threading
 from collections import deque
-from contextlib import contextmanager
 
 from browser_harness.helpers import drain_events
 
@@ -31,13 +37,26 @@ _subscriptions = []
 
 
 class Subscription:
-    """A consumer's own view of the event stream. Created by `subscribe`."""
+    """A consumer's own view of the event stream. Open one with `subscribe`."""
 
     def __init__(self, prefix="", session=None, maxlen=MAX_QUEUED):
         self.prefix = prefix
         self.session = session
         self.dropped = 0
         self._queue = deque(maxlen=maxlen)
+
+    def close(self):
+        """Stop receiving events. Idempotent, so a session can close an open one blindly."""
+        with _lock:
+            if self in _subscriptions:
+                _subscriptions.remove(self)
+            self._queue.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exception):
+        self.close()
 
     def wants(self, event):
         if self.session is not None and event.get("session_id") != self.session:
@@ -66,19 +85,15 @@ def _fan_out():
                 subscription.offer(event)
 
 
-@contextmanager
 def subscribe(prefix="", session=None, maxlen=MAX_QUEUED):
-    """Receive every event matching `prefix` (and `session`, when given) for the block.
+    """Open a subscription to every event matching `prefix` (and `session`, when given).
 
-    Events that arrive before the subscription exists are not held for it, so
-    subscribe before the traffic starts -- before `Page.startScreencast`, before
-    the action whose requests a wait will count.
+    Usable as a context manager, or held open across a session and closed by hand.
+    Events that arrived before it opened are not held for it, so subscribe before
+    the traffic starts -- before `Page.startScreencast`, before the action whose
+    requests a wait will count.
     """
     subscription = Subscription(prefix=prefix, session=session, maxlen=maxlen)
     with _lock:
         _subscriptions.append(subscription)
-    try:
-        yield subscription
-    finally:
-        with _lock:
-            _subscriptions.remove(subscription)
+    return subscription

@@ -17,7 +17,11 @@ corrections to the source were needed to make it report the truth here:
 - The daemon's event buffer is drained destructively, so the idle check reads it
   through `events.subscribe` rather than directly. A concurrent consumer -- the
   recorder's screencast thread -- would otherwise take the Network events this
-  check needs, and lose the frames it needs to this check.
+  check needs, and lose the frames it needs to this check. The subscription is
+  the session's own (`Browser.traffic`), open from before the first navigation:
+  a wait that subscribed only for its own duration would still miss every
+  request that started before the model chose WAIT, because the recorder's
+  drains discard what nothing is subscribed to.
 
 `wait_for_document_load` is the document layer. `Page.navigate` returns only
 once the navigation has committed, so the executor's own startup poll does not
@@ -76,10 +80,16 @@ def _committed(browser):
 
 @contextmanager
 def network_events(browser):
-    """Enable the Network domain for the block unless the session already has it.
+    """Yield this session's Network subscription, enabling the domain if it is off.
 
     Nothing delivers Network events until the domain is enabled, so an idle check
     without this reports idle having observed no traffic at all.
+
+    A session that enabled the domain in its constructor also opened a
+    subscription there, and that one is used: it has been collecting since before
+    the page loaded, so a request that started before the WAIT decision is still
+    counted. Only a session without one (a bridge lacking the domain, a test
+    double) pays for a subscription that lives no longer than the wait.
     """
     owned = not getattr(browser, "network_enabled", False)
     if owned:
@@ -88,8 +98,13 @@ def network_events(browser):
             browser.network_enabled = True
         except RuntimeError:
             owned = False  # A bridge without the Network domain still gets its idle window.
+    traffic = getattr(browser, "traffic", None)
     try:
-        yield
+        if traffic is not None:
+            yield traffic
+        else:
+            with subscribe(prefix="Network.", session=browser.session) as traffic:
+                yield traffic
     finally:
         if owned:
             browser.network_enabled = False
@@ -105,11 +120,17 @@ def wait_for_network_idle(browser, timeout=DEFAULT_TIMEOUT, idle_ms=IDLE_MS):
     Returns True on an idle window, False on timeout. The subscription delivers
     this session's Network events only; another tab's traffic cannot hold this
     wait busy, and a concurrent consumer of the daemon's buffer cannot starve it.
+
+    The first drain carries the backlog since the last wait, so a request that
+    started before this call counts as in flight, and one that started and
+    finished before it cancels itself out. A backlog past the queue bound loses
+    its oldest events first, and a request's start is always older than its own
+    settle event, so a dropped pair cannot strand a request in flight here.
     """
     deadline = time.monotonic() + timeout
     last_activity = time.monotonic()
     in_flight = set()
-    with network_events(browser), subscribe(prefix="Network.", session=browser.session) as traffic:
+    with network_events(browser) as traffic:
         while time.monotonic() < deadline:
             for event in traffic.drain():
                 method = event.get("method", "")

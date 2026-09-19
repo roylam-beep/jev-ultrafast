@@ -140,3 +140,40 @@ def test_concurrent_drains_lose_nothing(monkeypatch):
 
     for seen in collected.values():
         assert [e["params"]["requestId"] for e in seen] == [str(n) for n in range(200)]
+
+
+def test_a_subscription_held_open_keeps_collecting(monkeypatch):
+    """A session's subscription is not scoped to a block; it spans every wait in the run."""
+    monkeypatch.setattr(
+        event_bus,
+        "drain_events",
+        batches([event("Network.requestWillBeSent", request="a")], [event("Network.loadingFinished", request="a")]),
+    )
+    traffic = event_bus.subscribe(prefix="Network.")
+    try:
+        assert len(traffic.drain()) == 1
+        assert len(traffic.drain()) == 1
+    finally:
+        traffic.close()
+    assert event_bus._subscriptions == []
+
+
+def test_a_closed_subscription_receives_nothing_more(monkeypatch):
+    monkeypatch.setattr(event_bus, "drain_events", batches([], [event("Network.requestWillBeSent")]))
+    traffic = event_bus.subscribe()
+    pump = event_bus.subscribe()
+    try:
+        traffic.drain()
+        traffic.close()
+        pump.drain()
+        assert traffic.drain() == []
+    finally:
+        pump.close()
+
+
+def test_closing_twice_is_a_no_op(monkeypatch):
+    monkeypatch.setattr(event_bus, "drain_events", batches())
+    traffic = event_bus.subscribe()
+    traffic.close()
+    traffic.close()
+    assert event_bus._subscriptions == []
