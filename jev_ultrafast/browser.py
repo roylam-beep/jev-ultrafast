@@ -15,6 +15,10 @@ from .pointer import scroll_expression
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
 
+# Action kinds whose mutation happens inside a Runtime.evaluate, so an interrupted
+# evaluation is an uncertain execution rather than a stale read.
+MUTATING_EVALUATIONS = {"select": "Dropdown", "scroll": "Scroll"}
+
 # A WAIT costs a decision, so it is worth more than a fixed slice; it still has to
 # return well inside the loop's budget when the page never settles.
 WAIT_BUDGET = 2.0
@@ -168,8 +172,12 @@ def browser_operation(request):
     def evaluate(expression):
         result = call("Runtime.evaluate", expression=expression, returnByValue=True)
         if result.get("exceptionDetails"):
-            if operation == "act" and request["action"]["kind"] == "select":
-                raise RuntimeError("Dropdown execution was interrupted; inspect before retrying.")
+            # These kinds mutate inside the evaluation itself, so an interruption may
+            # land after the page already changed. Reporting it as staleness would let
+            # the loop re-predict and mutate twice, with the first never logged.
+            kind = request["action"]["kind"] if operation == "act" else None
+            if kind in MUTATING_EVALUATIONS:
+                raise RuntimeError(f"{MUTATING_EVALUATIONS[kind]} execution was interrupted; inspect before retrying.")
             raise StalePage("Document changed during evaluation")
         return result.get("result", {}).get("value")
 
