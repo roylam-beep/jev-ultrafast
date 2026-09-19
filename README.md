@@ -91,6 +91,16 @@ uv run --env-file .env python examples/run.py \
 
 `uv run --env-file .env python examples/flights.py --keep-open` performs the flight search, checks the actual route/date/results, and saves its trace. It does not select or book a flight.
 
+### Dual-Engine Agent: Jev 1.13 + GLM-5.3-Flash
+
+Combines Jev's sub-50ms atomic reflex loop with GLM-5.3-Flash as both a text helper and an intelligent multimodal visual supervisor:
+
+```bash
+uv run --env-file .env python examples/dual_engine_agent.py \
+  --url "https://www.google.com/travel/flights?hl=en" \
+  --goal "Find one-way flights from Zurich to London on September 20, 2026 for one adult in economy."
+```
+
 ## Why it moves
 
 - **One request per decision cycle.** Operation and target heads share the same observed state.
@@ -109,11 +119,13 @@ Every executed target is resolved from an observed node. The executor rechecks p
 | File | Job |
 | --- | --- |
 | [agent.py](jev_ultrafast/agent.py) | The complete loop and text-helper handoff |
+| [supervisor.py](jev_ultrafast/supervisor.py) | Multimodal visual diagnosis, deadlock recovery, and goal verification via GLM-5.3-Flash |
 | [snapshot.js](jev_ultrafast/snapshot.js) | Atomic DOM snapshot, indexed controls, freshness guards |
 | [browser.py](jev_ultrafast/browser.py) | Browser connection, current geometry, execution |
 | [model.py](jev_ultrafast/model.py) | Dynamic operation/target heads and text generation |
 | [questions.py](jev_ultrafast/questions.py) | Model instructions |
 | [demo.py](jev_ultrafast/demo.py) | Local inspector |
+| [dual_engine_agent.py](examples/dual_engine_agent.py) | End-to-end dual-engine runner combining Jev reflex with GLM supervision |
 
 ## Evidence and limits
 

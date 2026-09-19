@@ -116,7 +116,8 @@ def choose(state, goal, history):
         "questions": questions,
     }
     started = time.perf_counter()
-    result = post_json("https://api.typesafe.ai/v1/systemone", os.environ["TYPESAFE_API_KEY"], body)
+    typesafe_url = os.environ.get("TYPESAFE_BASE_URL", "https://api.typesafe.ai/v1/systemone")
+    result = post_json(typesafe_url, os.environ["TYPESAFE_API_KEY"], body)
     operation_answer = validate_choice(result["answers"].get("operation", {}), operations)
     operation = operation_answer["choice"]
     target = None
@@ -163,9 +164,17 @@ def field_text(context):
         raise ValueError("TYPE_TEXT needs TEXT_MODEL_API_KEY; no text is hardcoded or guessed by the executor.")
     base = os.environ.get("TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
     model = os.environ.get("TEXT_MODEL", "deepseek-chat")
-    reasoning = {"thinking": {"type": "disabled"}} if "api.deepseek.com/" in base else {"reasoning": {"effort": "low"}}
-    if os.environ.get("TEXT_MODEL_REASONING") == "none":
+    reasoning_setting = os.environ.get("TEXT_MODEL_REASONING", "")
+    if reasoning_setting == "none":
         reasoning = {"reasoning": {"enabled": False}}
+    elif reasoning_setting == "omit":
+        reasoning = {}
+    elif reasoning_setting == "enabled":
+        reasoning = {"thinking": {"type": "enabled"}}
+    elif "api.deepseek.com" in base:
+        reasoning = {"thinking": {"type": "disabled"}}
+    else:
+        reasoning = {"reasoning": {"effort": "low"}}
     started = time.perf_counter()
     result = post_json(
         base + "/chat/completions",
