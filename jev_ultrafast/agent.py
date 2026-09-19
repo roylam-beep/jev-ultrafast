@@ -164,6 +164,37 @@ class Agent:
         while self.state["status"] not in {"done", "blocked"}:
             yield self.command("tick")
 
+    def resume(self, reason: str, action_type: str = "RECOVERY", note: str = ""):
+        """Safely transitions state after external recovery and injects feedback for Jev."""
+        state = self.state
+        state["status"] = "ready"
+        state["decision"] = None
+        state["page"] = self.browser.observe(screenshot=self.screenshots)
+        elapsed = round((time.perf_counter() - state["started_at"]) * 1000) if state.get("started_at") else 0
+        state["elapsed_ms"] = elapsed
+        state["history"].append(
+            {
+                "step": len(state["history"]) + 1,
+                "action": f"Supervisor Recovery: {reason}",
+                "kind": "supervisor",
+                "choice": "SUPERVISOR_RESUME",
+                "probability": 1.0,
+                "confidence": 1.0,
+                "latency_ms": 0,
+                "text": note or reason,
+                "text_helper": None,
+                "text_latency_ms": 0,
+                "operation": action_type,
+                "target": None,
+                "page_changed": True,
+                "url": state["page"]["url"],
+                "usage": {},
+                "executed_ms": elapsed,
+                "elapsed_ms": elapsed,
+            }
+        )
+        return self.snapshot()
+
     def close(self):
         self.browser.close()
 

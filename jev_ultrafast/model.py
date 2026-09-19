@@ -4,6 +4,7 @@ import json
 import math
 import os
 import time
+from urllib.parse import urlparse
 
 import httpx
 
@@ -116,8 +117,13 @@ def choose(state, goal, history):
         "questions": questions,
     }
     started = time.perf_counter()
-    typesafe_url = os.environ.get("TYPESAFE_BASE_URL", "https://api.typesafe.ai/v1/systemone")
-    result = post_json(typesafe_url, os.environ["TYPESAFE_API_KEY"], body)
+    typesafe_endpoint = os.environ.get(
+        "TYPESAFE_ENDPOINT",
+        os.environ.get("TYPESAFE_BASE_URL", "https://api.typesafe.ai/v1/systemone"),
+    ).rstrip("/")
+    if not typesafe_endpoint.startswith(("http://", "https://")):
+        raise ValueError(f"Invalid TYPESAFE_ENDPOINT URL scheme: {typesafe_endpoint}")
+    result = post_json(typesafe_endpoint, os.environ["TYPESAFE_API_KEY"], body)
     operation_answer = validate_choice(result["answers"].get("operation", {}), operations)
     operation = operation_answer["choice"]
     target = None
@@ -164,17 +170,34 @@ def field_text(context):
         raise ValueError("TYPE_TEXT needs TEXT_MODEL_API_KEY; no text is hardcoded or guessed by the executor.")
     base = os.environ.get("TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
     model = os.environ.get("TEXT_MODEL", "deepseek-chat")
-    reasoning_setting = os.environ.get("TEXT_MODEL_REASONING", "")
+
+    host = (urlparse(base).hostname or "").lower()
+    if host.endswith("openrouter.ai"):
+        proto = "openrouter"
+    elif host.endswith("bigmodel.cn") or host.endswith("z.ai"):
+        proto = "zhipu"
+    elif host == "api.deepseek.com" or host.endswith(".deepseek.com"):
+        proto = "deepseek"
+    else:
+        proto = "generic"
+
+    reasoning_setting = os.environ.get("TEXT_MODEL_REASONING", "").lower()
     if reasoning_setting == "none":
         reasoning = {"reasoning": {"enabled": False}}
     elif reasoning_setting == "omit":
         reasoning = {}
     elif reasoning_setting == "enabled":
         reasoning = {"thinking": {"type": "enabled"}}
-    elif "api.deepseek.com" in base:
+    elif reasoning_setting == "disabled":
         reasoning = {"thinking": {"type": "disabled"}}
-    else:
+    elif proto == "zhipu":
+        reasoning = {}
+    elif proto == "deepseek":
+        reasoning = {"thinking": {"type": "disabled"}}
+    elif proto == "openrouter":
         reasoning = {"reasoning": {"effort": "low"}}
+    else:
+        reasoning = {}
     started = time.perf_counter()
     result = post_json(
         base + "/chat/completions",
