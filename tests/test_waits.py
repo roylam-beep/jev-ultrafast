@@ -2,6 +2,7 @@
 
 import pytest
 
+from jev_ultrafast import events as event_bus
 from jev_ultrafast import waits
 from jev_ultrafast.browser import StalePage
 
@@ -36,7 +37,7 @@ class FakeBrowser:
 
 
 def events(*batches):
-    """A drain_events stub that yields each batch once, then stays empty."""
+    """A `drain_events` stub that yields each batch once, then stays empty."""
     queue = list(batches)
     return lambda: queue.pop(0) if queue else []
 
@@ -104,7 +105,7 @@ def test_a_document_swapping_mid_poll_is_waited_out():
 
 def test_network_idle_enables_the_domain_and_restores_it(monkeypatch):
     """Nothing delivers Network events until the domain is on."""
-    monkeypatch.setattr(waits, "drain_events", events())
+    monkeypatch.setattr(event_bus, "drain_events", events())
     browser = FakeBrowser()
     assert waits.wait_for_network_idle(browser, timeout=1, idle_ms=10) is True
     assert "Network.enable" in browser.calls
@@ -113,7 +114,7 @@ def test_network_idle_enables_the_domain_and_restores_it(monkeypatch):
 
 
 def test_network_idle_leaves_a_session_owned_domain_enabled(monkeypatch):
-    monkeypatch.setattr(waits, "drain_events", events())
+    monkeypatch.setattr(event_bus, "drain_events", events())
     browser = FakeBrowser()
     browser.network_enabled = True
     assert waits.wait_for_network_idle(browser, timeout=1, idle_ms=10) is True
@@ -123,13 +124,13 @@ def test_network_idle_leaves_a_session_owned_domain_enabled(monkeypatch):
 
 
 def test_an_unfinished_request_is_not_idle(monkeypatch):
-    monkeypatch.setattr(waits, "drain_events", events([network_event("Network.requestWillBeSent")]))
+    monkeypatch.setattr(event_bus, "drain_events", events([network_event("Network.requestWillBeSent")]))
     assert waits.wait_for_network_idle(FakeBrowser(), timeout=0.4, idle_ms=10) is False
 
 
 def test_a_finished_request_becomes_idle(monkeypatch):
     monkeypatch.setattr(
-        waits,
+        event_bus,
         "drain_events",
         events(
             [network_event("Network.requestWillBeSent")],
@@ -142,7 +143,7 @@ def test_a_finished_request_becomes_idle(monkeypatch):
 
 def test_a_failed_request_also_clears_in_flight(monkeypatch):
     monkeypatch.setattr(
-        waits,
+        event_bus,
         "drain_events",
         events([network_event("Network.requestWillBeSent")], [network_event("Network.loadingFailed")]),
     )
@@ -152,7 +153,7 @@ def test_a_failed_request_also_clears_in_flight(monkeypatch):
 def test_another_session_cannot_hold_this_one_busy(monkeypatch):
     """browser_harness filters to the daemon's active tab; the agent owns a background one."""
     monkeypatch.setattr(
-        waits,
+        event_bus,
         "drain_events",
         events([network_event("Network.requestWillBeSent", session="OTHER")]),
     )
@@ -160,7 +161,7 @@ def test_another_session_cannot_hold_this_one_busy(monkeypatch):
 
 
 def test_a_bridge_without_the_network_domain_still_returns(monkeypatch):
-    monkeypatch.setattr(waits, "drain_events", events())
+    monkeypatch.setattr(event_bus, "drain_events", events())
     browser = FakeBrowser(network=False)
     assert waits.wait_for_network_idle(browser, timeout=1, idle_ms=10) is True
     assert browser.network_enabled is False
@@ -184,7 +185,7 @@ def test_wait_for_function_wraps_the_expression():
 
 
 def test_load_state_dispatches(monkeypatch):
-    monkeypatch.setattr(waits, "drain_events", events())
+    monkeypatch.setattr(event_bus, "drain_events", events())
     browser = FakeBrowser()
     assert waits.wait_for_load_state(browser, "networkidle", timeout=1, idle_ms=10) is True
     assert "Network.enable" in browser.calls

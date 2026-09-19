@@ -14,6 +14,10 @@ corrections to the source were needed to make it report the truth here:
   equivalent `wait_for_network_idle`, but it filters to the daemon's *active*
   tab; the agent owns a background target, so its traffic would be discarded
   and any foreground tab's traffic counted in its place.
+- The daemon's event buffer is drained destructively, so the idle check reads it
+  through `events.subscribe` rather than directly. A concurrent consumer -- the
+  recorder's screencast thread -- would otherwise take the Network events this
+  check needs, and lose the frames it needs to this check.
 
 `wait_for_document_load` is the document layer. `Page.navigate` returns only
 once the navigation has committed, so the executor's own startup poll does not
@@ -24,9 +28,8 @@ need it; it is here for callers that navigate through page actions, where
 import time
 from contextlib import contextmanager
 
-from browser_harness.helpers import drain_events
-
 from .browser import StalePage
+from .events import subscribe
 
 DEFAULT_TIMEOUT = 10.0
 DOCUMENT_TIMEOUT = 15.0
@@ -99,20 +102,17 @@ def network_events(browser):
 def wait_for_network_idle(browser, timeout=DEFAULT_TIMEOUT, idle_ms=IDLE_MS):
     """Wait until nothing is in flight and no Network event arrived for `idle_ms`.
 
-    Returns True on an idle window, False on timeout. `drain_events` consumes the
-    daemon's shared buffer, so events for other sessions are dropped here.
+    Returns True on an idle window, False on timeout. The subscription delivers
+    this session's Network events only; another tab's traffic cannot hold this
+    wait busy, and a concurrent consumer of the daemon's buffer cannot starve it.
     """
     deadline = time.monotonic() + timeout
     last_activity = time.monotonic()
     in_flight = set()
-    with network_events(browser):
+    with network_events(browser), subscribe(prefix="Network.", session=browser.session) as traffic:
         while time.monotonic() < deadline:
-            for event in drain_events():
-                if event.get("session_id") != browser.session:
-                    continue
+            for event in traffic.drain():
                 method = event.get("method", "")
-                if not method.startswith("Network."):
-                    continue
                 request = (event.get("params") or {}).get("requestId")
                 if method == IN_FLIGHT_STARTED:
                     in_flight.add(request)
