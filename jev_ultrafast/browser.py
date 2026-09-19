@@ -2,12 +2,13 @@
 
 import hashlib
 import json
-import sys
 import time
 from pathlib import Path
 
 from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
+
+from .keyboard import key_events
 
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
@@ -191,21 +192,10 @@ def browser_operation(request):
                 for event in ("mousePressed", "mouseReleased"):
                     call("Input.dispatchMouseEvent", type=event, x=x, y=y, button="left", clickCount=1)
                 if kind == "fill":
-                    call(
-                        "Input.dispatchKeyEvent",
-                        type="keyDown",
-                        key="a",
-                        code="KeyA",
-                        modifiers=4 if sys.platform == "darwin" else 2,
-                        commands=["selectAll"],
-                    )
-                    call(
-                        "Input.dispatchKeyEvent",
-                        type="keyUp",
-                        key="a",
-                        code="KeyA",
-                        modifiers=4 if sys.platform == "darwin" else 2,
-                    )
+                    # Replace, do not append. A page can intercept the accelerator, so
+                    # the selectAll command is what makes the selection actually happen.
+                    for event in key_events("ControlOrMeta+a"):
+                        call("Input.dispatchKeyEvent", **event)
                     call("Input.insertText", text=request["text"])
         return {"executed": action["id"]}
 

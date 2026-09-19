@@ -6,7 +6,9 @@ from unittest.mock import Mock, patch
 import httpx
 import pytest
 
+from jev_ultrafast.keyboard import key_definition
 from jev_ultrafast.supervisor import (
+    ALLOWED_KEYS,
     SETTLE_PROBE,
     GLMSupervisor,
     _settle,
@@ -378,23 +380,25 @@ def test_apply_recovery_keypress_with_virtual_key_code():
 
     assert supervisor.apply_recovery(mock_browser, diagnosis) is True
     assert mock_browser.call.call_count == 2
-    mock_browser.call.assert_any_call(
-        "Input.dispatchKeyEvent",
-        type="keyDown",
-        key="Escape",
-        code="Escape",
-        windowsVirtualKeyCode=27,
-        nativeVirtualKeyCode=27,
-    )
-    mock_browser.call.assert_any_call(
-        "Input.dispatchKeyEvent",
-        type="keyUp",
-        key="Escape",
-        code="Escape",
-        windowsVirtualKeyCode=27,
-        nativeVirtualKeyCode=27,
-    )
+    for event_type in ("keyDown", "keyUp"):
+        mock_browser.call.assert_any_call(
+            "Input.dispatchKeyEvent",
+            type=event_type,
+            key="Escape",
+            code="Escape",
+            windowsVirtualKeyCode=27,
+            nativeVirtualKeyCode=27,
+            modifiers=0,
+        )
     supervisor.close()
+
+
+def test_every_allowed_recovery_key_has_a_definition():
+    """A key the policy allows must not dispatch as an unidentified keyCode 0."""
+    for key in ALLOWED_KEYS:
+        virtual_key, code, _text = key_definition(key)
+        assert virtual_key, key
+        assert code == key, key
 
 
 def test_apply_recovery_scroll_dynamic_viewport():
