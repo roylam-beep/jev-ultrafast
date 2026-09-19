@@ -56,6 +56,12 @@ def post_json(url, key, body):
     raise RuntimeError("Model unavailable")
 
 
+def uses_choice_api(url):
+    """TypeSafe answers the whole question set natively; anything else goes through chat."""
+    host = (urlparse(url).hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in TYPESAFE_CHOICE_HOSTS)
+
+
 def provider(base):
     host = (urlparse(base).hostname or "").lower()
     if host.endswith("openrouter.ai"):
@@ -248,8 +254,7 @@ def choose(state, goal, history):
         DEFAULT_TYPESAFE_ENDPOINT,
     )
     key = os.environ["TYPESAFE_API_KEY"]
-    host = (urlparse(typesafe_endpoint).hostname or "").lower()
-    if any(host == h or host.endswith("." + h) for h in TYPESAFE_CHOICE_HOSTS):
+    if uses_choice_api(typesafe_endpoint):
         result = post_json(typesafe_endpoint, key, body)
     else:
         result = chat_answers(

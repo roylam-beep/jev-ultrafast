@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Dual-Engine Browser Agent Example: Jev 1.13 + GLM-5.3-Flash (Hardened Edition)
+Dual-Engine Browser Agent Example (Hardened Edition)
 
 Architecture:
-1. Fast Reflex Loop (System 1): TypeSafe Jev 1.13 executes sub-50ms atomic choices.
-2. Smart Text Helper: GLM-5.3-Flash generates structured text when TYPE_TEXT is required.
-3. Multimodal Supervisor (System 2): GLM-5.3-Flash visually diagnoses obstacles and audits goals.
+1. Fast Reflex Loop (System 1): the policy picks one operation and target per observation.
+2. Smart Text Helper: the text model generates structured text when TYPE_TEXT is required.
+3. Multimodal Supervisor (System 2): the vision model diagnoses obstacles and audits goals.
+
+Systems 1 and 2 run on whatever .env configures; the banner below prints the models in use.
+The shipped configuration puts all three on one OpenRouter key. Point TYPESAFE_ENDPOINT at
+TypeSafe's choice API with TYPESAFE_MODEL=jev-latest to run Jev itself as System 1.
 """
 
 import argparse

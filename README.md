@@ -103,9 +103,9 @@ uv run --env-file .env python examples/run.py \
 
 `uv run --env-file .env python examples/flights.py --keep-open` performs the flight search, checks the actual route/date/results, and saves its trace. It does not select or book a flight.
 
-### Dual-Engine Agent: Jev 1.13 + GLM-5.3-Flash
+### Dual-Engine Agent
 
-Combines Jev's sub-50ms atomic reflex loop with GLM-5.3-Flash as both a text helper and an intelligent multimodal visual supervisor:
+Combines the atomic reflex loop with a second model acting as both text helper and multimodal visual supervisor. The shipped configuration runs all three on one OpenRouter key; set `TYPESAFE_ENDPOINT` and `TYPESAFE_MODEL` as above to make System 1 Jev itself. The banner printed at startup names the models actually in use:
 
 ```bash
 uv run --env-file .env python examples/dual_engine_agent.py \
@@ -143,13 +143,13 @@ Every executed target is resolved from an observed node. The executor rechecks p
 | File | Job |
 | --- | --- |
 | [agent.py](jev_ultrafast/agent.py) | The complete loop and text-helper handoff |
-| [supervisor.py](jev_ultrafast/supervisor.py) | Multimodal visual diagnosis, deadlock recovery, and goal verification via GLM-5.3-Flash |
+| [supervisor.py](jev_ultrafast/supervisor.py) | Multimodal visual diagnosis, deadlock recovery, and goal verification |
 | [snapshot.js](jev_ultrafast/snapshot.js) | Atomic DOM snapshot, indexed controls, freshness guards |
 | [browser.py](jev_ultrafast/browser.py) | Browser connection, current geometry, execution |
 | [model.py](jev_ultrafast/model.py) | Dynamic operation/target heads and text generation |
 | [questions.py](jev_ultrafast/questions.py) | Model instructions |
 | [demo.py](jev_ultrafast/demo.py) | Local inspector |
-| [dual_engine_agent.py](examples/dual_engine_agent.py) | End-to-end dual-engine runner combining Jev reflex with GLM supervision |
+| [dual_engine_agent.py](examples/dual_engine_agent.py) | End-to-end dual-engine runner combining the reflex loop with visual supervision |
 
 ## Evidence and limits
 
@@ -171,7 +171,7 @@ node --check jev_ultrafast/snapshot.js
 uv build
 ```
 
-Tests are offline. `uv run python scripts/check_guards.py` checks real controls in a local browser without model calls. Live examples and recording scripts make paid API calls. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
+Tests are offline. `uv run python scripts/check_guards.py` checks real controls in a local browser without model calls. `uv run --env-file .env python scripts/probe_provider.py` goes the other way: it calls the configured policy, text, and vision endpoints once each — no browser — so a wrong key, endpoint, or model id surfaces before a live run. Live examples, the probe, and recording scripts make paid API calls. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
 
 ---
 
