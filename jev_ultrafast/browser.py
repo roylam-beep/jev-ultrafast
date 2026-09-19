@@ -13,6 +13,12 @@ from browser_harness.helpers import cdp
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
 
+# A WAIT costs a decision, so it is worth more than a fixed slice; it still has to
+# return well inside the loop's budget when the page never settles.
+WAIT_BUDGET = 2.0
+WAIT_IDLE_MS = 250
+
+
 class StalePage(ValueError):
     """A decision no longer refers to the observed page."""
 
@@ -25,6 +31,16 @@ class Browser:
         self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
         # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.
         self.call("Emulation.setFocusEmulationEnabled", enabled=True)
+        # Events only arrive while the domain is on. Enabling once here keeps every
+        # later wait at zero extra protocol calls.
+        self.network_enabled = False
+        try:
+            self.call("Network.enable")
+            self.network_enabled = True
+        except RuntimeError:
+            pass  # A bridge without the Network domain still runs; waits fall back to time.
+        # Page.navigate returns once the navigation commits, so readyState already
+        # describes the new document. No document-identity check is needed here.
         self.call("Page.navigate", url=url)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -101,7 +117,11 @@ class Browser:
         if not self.fresh(page, action):
             raise StalePage("Page changed since this decision. Observe again.")
         if action["kind"] == "wait":
-            time.sleep(0.1)
+            # WAIT means the page is working. Return the moment it goes quiet instead
+            # of sleeping a fixed slice and spending another decision to look again.
+            from .waits import wait_for_network_idle
+
+            wait_for_network_idle(self, timeout=WAIT_BUDGET, idle_ms=WAIT_IDLE_MS)
         result = browser_operation({"operation": "act", "session": self.session, "action": action, "text": text})
         self.after_input = action if action["kind"] != "wait" else None
         return result

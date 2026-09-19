@@ -19,6 +19,10 @@ The optimized runtime was faster in all three pairs. Median task time was **25.0
 
 The original arm is the frozen source from `68c077bf79caca4e817b8e8a5854b2efa0c81ff6`. Both arms use Mercury so the runtime comparison does not conflate a helper-model change with code changes. Per-run source hashes, model settings, token counts, helper costs, browser version, protocol counts, and verification results are in the measurement JSON.
 
+## Measurement boundary for `WAIT`
+
+Every measurement on this page was recorded when the `WAIT` operation was a fixed `time.sleep(0.1)`. Both the 7.073 s recording and the matched-comparison runs contain exactly one `WAIT` action, so each carries 100 ms of fixed sleep. `WAIT` now waits on the session's network going idle instead (250 ms quiet, 2 s ceiling), which can move a single action either way and removes the follow-up decision a still-loading page used to cost. The numbers below have not been re-recorded against that change.
+
 ## Where the time went
 
 The original loop invalidated decisions on every DOM mutation, including animations. It also read the accessibility tree repeatedly and resolved hundreds of DOM nodes. The new snapshot reads common HTML/ARIA controls in one browser call. Click guards compare the selected target and nearby context, plus document/form state. Current geometry and hit-testing still run before input.
