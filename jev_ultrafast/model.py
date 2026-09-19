@@ -14,7 +14,7 @@ CLIENT = httpx.Client(http2=True, timeout=25)
 
 # The shipped configuration in .env.example. Keep these, the README, and the inspector in step.
 DEFAULT_TYPESAFE_ENDPOINT = "https://openrouter.ai/api/v1"
-DEFAULT_TYPESAFE_MODEL = "zhipu/glm-5.3-flash"
+DEFAULT_TYPESAFE_MODEL = "typesafe/jev-1.13"
 # TypeSafe's own choice API, for TYPESAFE_ENDPOINT when running Jev instead of a chat model.
 DEFAULT_TYPESAFE_CHOICE_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_TEXT_BASE_URL = "https://openrouter.ai/api/v1"

@@ -67,15 +67,15 @@ Chrome connects through [Browser Harness](https://github.com/browser-use/browser
 
 ### Providers
 
-[.env.example](.env.example) ships one OpenRouter key driving all three models, and those values are also the built-in defaults, so unset variables match the documented setup.
+[.env.example](.env.example) ships one OpenRouter key driving all three models — Jev picks the operation and target, and a small chat model writes field values and audits the result — and those values are also the built-in defaults, so unset variables match the documented setup.
 
 | Variable | Job | Default |
 | --- | --- | --- |
-| `TYPESAFE_API_KEY` / `TYPESAFE_ENDPOINT` / `TYPESAFE_MODEL` | Picks the operation and target each step | `https://openrouter.ai/api/v1`, `zhipu/glm-5.3-flash` |
-| `TEXT_MODEL_API_KEY` / `TEXT_MODEL_BASE_URL` / `TEXT_MODEL` | Writes field values for `TYPE_TEXT` | same |
+| `TYPESAFE_API_KEY` / `TYPESAFE_ENDPOINT` / `TYPESAFE_MODEL` | Picks the operation and target each step | `https://openrouter.ai/api/v1`, `typesafe/jev-1.13` |
+| `TEXT_MODEL_API_KEY` / `TEXT_MODEL_BASE_URL` / `TEXT_MODEL` | Writes field values for `TYPE_TEXT` | same endpoint, `zhipu/glm-5.3-flash` |
 | `VISION_MODEL_API_KEY` / `VISION_MODEL_BASE_URL` / `VISION_MODEL` | Visual supervisor, falls back to the text settings | same |
 
-The policy speaks two protocols. Against `typesafe.ai` it uses TypeSafe's constrained choice API, which returns a real probability distribution over the offered ids. Against any other endpoint it asks one OpenAI-compatible chat model to answer every question in a single JSON reply; that model reports one choice and one confidence per question, so the distribution shown in the inspector is spread from that confidence rather than measured per element. Both paths keep one request per decision cycle, and both validate every answer against the observed element ids before anything executes — a key the page never offered is rejected, not clamped. Set `TYPESAFE_ENDPOINT=https://api.typesafe.ai/v1/systemone` with `TYPESAFE_MODEL=jev-latest` to run Jev itself; the measurements below were taken on that path.
+The policy speaks two protocols. Against `typesafe.ai` it uses TypeSafe's constrained choice API, which returns a real probability distribution over the offered ids. Against any other endpoint it asks one OpenAI-compatible chat model to answer every question in a single JSON reply; that model reports one choice and one confidence per question, so the distribution shown in the inspector is spread from that confidence rather than measured per element. Both paths keep one request per decision cycle, and both validate every answer against the observed element ids before anything executes — a key the page never offered is rejected, not clamped. The shipped configuration runs Jev over OpenRouter, so the policy is the same model either way and only the protocol differs. Set `TYPESAFE_ENDPOINT=https://api.typesafe.ai/v1/systemone` with `TYPESAFE_MODEL=jev-latest` to reach it through the choice API and get measured per-element probabilities; the measurements below were taken on that path.
 
 OpenRouter, Zhipu, Gemini, and DeepSeek all work for the chat path; set the matching model, endpoint, and `TYPESAFE_MODEL_REASONING` / `TEXT_MODEL_REASONING`. Every endpoint must be `http://` or `https://` — each one carries a bearer token, so an unvalidated setting is rejected before the request.
 
@@ -105,7 +105,7 @@ uv run --env-file .env python examples/run.py \
 
 ### Dual-Engine Agent
 
-Combines the atomic reflex loop with a second model acting as both text helper and multimodal visual supervisor. The shipped configuration runs all three on one OpenRouter key; set `TYPESAFE_ENDPOINT` and `TYPESAFE_MODEL` as above to make System 1 Jev itself. The banner printed at startup names the models actually in use:
+Combines the atomic reflex loop with a second model acting as both text helper and multimodal visual supervisor. The shipped configuration runs all three on one OpenRouter key, with Jev as System 1; set `TYPESAFE_ENDPOINT` as above to reach Jev through TypeSafe's choice API instead. The banner printed at startup names the models actually in use:
 
 ```bash
 uv run --env-file .env python examples/dual_engine_agent.py \

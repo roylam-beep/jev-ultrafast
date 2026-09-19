@@ -8,8 +8,8 @@ Architecture:
 3. Multimodal Supervisor (System 2): the vision model diagnoses obstacles and audits goals.
 
 Systems 1 and 2 run on whatever .env configures; the banner below prints the models in use.
-The shipped configuration puts all three on one OpenRouter key. Point TYPESAFE_ENDPOINT at
-TypeSafe's choice API with TYPESAFE_MODEL=jev-latest to run Jev itself as System 1.
+The shipped configuration puts all three on one OpenRouter key, with Jev as System 1. Point
+TYPESAFE_ENDPOINT at TypeSafe's choice API to reach Jev through its constrained protocol.
 """
 
 import argparse
