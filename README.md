@@ -72,7 +72,7 @@ Chrome connects through [Browser Harness](https://github.com/browser-use/browser
 | Variable | Job | Default |
 | --- | --- | --- |
 | `TYPESAFE_API_KEY` / `TYPESAFE_ENDPOINT` / `TYPESAFE_MODEL` | Picks the operation and target each step | `https://openrouter.ai/api/v1`, `typesafe/jev-1.13` |
-| `TEXT_MODEL_API_KEY` / `TEXT_MODEL_BASE_URL` / `TEXT_MODEL` | Writes field values for `TYPE_TEXT` | same endpoint, `zhipu/glm-5.3-flash` |
+| `TEXT_MODEL_API_KEY` / `TEXT_MODEL_BASE_URL` / `TEXT_MODEL` | Writes field values for `TYPE_TEXT` | same endpoint, `z-ai/glm-5.3-flash` |
 | `VISION_MODEL_API_KEY` / `VISION_MODEL_BASE_URL` / `VISION_MODEL` | Visual supervisor, falls back to the text settings | same |
 
 The policy speaks two protocols. Against `typesafe.ai` it uses TypeSafe's constrained choice API, which returns a real probability distribution over the offered ids. Against any other endpoint it asks one OpenAI-compatible chat model to answer every question in a single JSON reply; that model reports one choice and one confidence per question, so the distribution shown in the inspector is spread from that confidence rather than measured per element. Both paths keep one request per decision cycle, and both validate every answer against the observed element ids before anything executes — a key the page never offered is rejected, not clamped. The shipped configuration runs Jev over OpenRouter, so the policy is the same model either way and only the protocol differs. Set `TYPESAFE_ENDPOINT=https://api.typesafe.ai/v1/systemone` with `TYPESAFE_MODEL=jev-latest` to reach it through the choice API and get measured per-element probabilities; the measurements below were taken on that path.

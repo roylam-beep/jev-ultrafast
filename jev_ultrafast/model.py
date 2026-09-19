@@ -18,7 +18,7 @@ DEFAULT_TYPESAFE_MODEL = "typesafe/jev-1.13"
 # TypeSafe's own choice API, for TYPESAFE_ENDPOINT when running Jev instead of a chat model.
 DEFAULT_TYPESAFE_CHOICE_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_TEXT_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_TEXT_MODEL = "zhipu/glm-5.3-flash"
+DEFAULT_TEXT_MODEL = "z-ai/glm-5.3-flash"
 # TypeSafe's own choice API answers every question in one constrained request. Any other
 # OpenAI-compatible provider is reached through chat completions, which returns free-form
 # JSON, so the answers it gives are validated against the same observed ids either way.
