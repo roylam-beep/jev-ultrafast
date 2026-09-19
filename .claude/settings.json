@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "cc-harness": {
+      "source": {
+        "source": "github",
+        "repo": "roylam-beep/cc-harness"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "cc-harness@cc-harness": true
+  }
+}
