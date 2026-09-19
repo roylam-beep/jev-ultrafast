@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 import httpx
 import pytest
 
-from jev_ultrafast.supervisor import GLMSupervisor, _settle, validate_recovery_action
+from jev_ultrafast.supervisor import GLMSupervisor, _settle, screen_click_text, validate_recovery_action
 
 
 @pytest.fixture(autouse=True)
@@ -432,12 +432,18 @@ def test_apply_recovery_scroll_non_dict_fallback():
     supervisor.close()
 
 
-def test_apply_recovery_click_text_success():
-    supervisor = GLMSupervisor(api_key="valid-key")
+def _click_text_browser(resolved):
+    """A browser whose CLICK_TEXT resolver returns coordinates plus the element's own text."""
     mock_browser = Mock()
     mock_browser.evaluate.side_effect = (
-        lambda expr: "complete:1000" if "innerHTML" in expr else {"x": 200, "y": 300}
+        lambda expr: "complete:1000" if "innerHTML" in expr else {"x": 200, "y": 300, "text": resolved}
     )
+    return mock_browser
+
+
+def test_apply_recovery_click_text_success():
+    supervisor = GLMSupervisor(api_key="valid-key")
+    mock_browser = _click_text_browser("Close")
 
     diagnosis = {
         "can_auto_recover": True,
@@ -469,6 +475,71 @@ def test_apply_recovery_click_text_evaluate_none():
     assert supervisor.apply_recovery(mock_browser, diagnosis) is False
     assert mock_browser.call.call_count == 0
     supervisor.close()
+
+
+@pytest.mark.parametrize(
+    "target_text, resolved",
+    [
+        # "ok" clears every guard, but the DOM resolves it onto a purchase button.
+        ("ok", "Book now"),
+        ("好的", "好的，刪除帳戶"),
+        ("close", "Close account and delete all data"),
+        # Safe prefix, but the resolved element is not a dismiss control at all.
+        ("continue", "Continue to checkout"),
+    ],
+)
+def test_apply_recovery_click_text_screens_the_resolved_element(target_text, resolved):
+    """The blacklist must screen the element clicked, not only the label the model proposed."""
+    supervisor = GLMSupervisor(api_key="valid-key")
+    mock_browser = _click_text_browser(resolved)
+
+    diagnosis = {"can_auto_recover": True, "action_type": "CLICK_TEXT", "target_text": target_text}
+    assert validate_recovery_action(diagnosis) is True, "proposal alone passes the policy"
+    assert supervisor.apply_recovery(mock_browser, diagnosis) is False
+    assert not [c for c in mock_browser.call.call_args_list if c.args[:1] == ("Input.dispatchMouseEvent",)]
+    supervisor.close()
+
+
+def test_apply_recovery_click_text_rejects_missing_resolved_text():
+    supervisor = GLMSupervisor(api_key="valid-key")
+    mock_browser = Mock()
+    mock_browser.evaluate.side_effect = (
+        lambda expr: "complete:1000" if "innerHTML" in expr else {"x": 10, "y": 10}
+    )
+    diagnosis = {"can_auto_recover": True, "action_type": "CLICK_TEXT", "target_text": "Close"}
+    assert supervisor.apply_recovery(mock_browser, diagnosis) is False
+    assert mock_browser.call.call_count == 0
+    supervisor.close()
+
+
+def test_click_text_resolver_anchors_the_match():
+    """A substring match lets a safe prefix select an unrelated element."""
+    supervisor = GLMSupervisor(api_key="valid-key")
+    captured = []
+
+    def evaluate(expr):
+        if "innerHTML" in expr:
+            return "complete:1000"
+        captured.append(expr)
+        return None
+
+    mock_browser = Mock()
+    mock_browser.evaluate.side_effect = evaluate
+    supervisor.apply_recovery(
+        mock_browser, {"can_auto_recover": True, "action_type": "CLICK_TEXT", "target_text": "OK"}
+    )
+    script = captured[0]
+    assert "startsWith(text)" in script
+    assert "includes(text)" not in script
+    assert '"ok"' in script
+    supervisor.close()
+
+
+def test_screen_click_text_limits():
+    assert screen_click_text("Accept all cookies", limit=40, source="t") is True
+    assert screen_click_text("Accept all cookies", limit=5, source="t") is False
+    assert screen_click_text(None, limit=40, source="t") is False
+    assert screen_click_text("   ", limit=40, source="t") is False
 
 
 def test_apply_recovery_reload_with_navigation_detection():

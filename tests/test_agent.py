@@ -276,6 +276,41 @@ def test_fingerprint_tracks_values_and_identity_not_screenshots():
     assert fingerprint(p) != fingerprint(other)
 
 
+def test_fingerprint_ignores_geometry():
+    """Animation must not report page_changed; that would defeat the no-progress stop."""
+    p = page()
+    for action in p["actions"]:
+        action["rect"] = {"x": 0, "y": 0, "w": 100, "h": 20}
+    p["fingerprint"] = fingerprint(p)
+    moved = deepcopy(p)
+    for action in moved["actions"]:
+        action["rect"] = {"x": 3, "y": 41, "w": 100, "h": 20}
+    assert fingerprint(moved) == fingerprint(p)
+    moved["actions"][2]["label"] = "Search"
+    assert fingerprint(moved) != fingerprint(p)
+
+
+def test_no_progress_stop_survives_a_moving_page(runner):
+    """Three unchanged-but-animating steps still stop the run for the supervisor."""
+    offset = iter(range(1, 100))
+
+    def observe(screenshot=False):
+        state = page()
+        for action in state["actions"]:
+            action["rect"] = {"x": next(offset), "y": 0, "w": 100, "h": 20}
+        state["fingerprint"] = fingerprint(state)
+        return state
+
+    runner.state["browser"].observe.side_effect = observe
+    runner.state["page"] = observe()
+    for _ in range(3):
+        runner.state["decision"] = decision("e3")
+        runner.state["status"] = "predicted"
+        runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert [h["page_changed"] for h in runner.state["history"]] == [False, False, False]
+    assert runner.state["status"] == "blocked"
+
+
 @pytest.mark.parametrize("changed", ["Departure", "Where from?", "Where to?", "year"])
 def test_flight_verification_rejects_wrong_trip(changed):
     from examples.flights import verify

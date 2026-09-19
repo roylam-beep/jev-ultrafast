@@ -50,81 +50,97 @@ def run_dual_engine(
         with Agent(url, goal, screenshots=True) as agent:
             print("\n🚀 Agent loop initiated...")
 
-            while agent.state.get("status") not in {"done", "blocked"}:
-                # Enforce global bounds (max steps and deadline)
-                if len(agent.state.get("history", [])) >= max_steps:
-                    print(f"\n🛑 Reached maximum step limit ({max_steps}); stopping.")
+            # A blocked run is not the end of the loop: the supervisor gets its retries first,
+            # so the exit conditions are checked here rather than in the while clause.
+            while True:
+                if agent.state.get("status") == "done":
                     break
                 if time.perf_counter() >= deadline:
                     print(f"\n🛑 Reached execution deadline ({deadline_seconds}s); stopping.")
                     break
 
-                agent.command("tick")
-
-                # Realtime action telemetry with safe get() access
-                history = agent.state.get("history", [])
-                if history:
-                    last = history[-1]
-                    text_val = last.get("text")
-                    text_info = f" [Typed: '{text_val}']" if text_val else ""
-                    print(
-                        f"⏱️  [{last.get('elapsed_ms', 0)}ms] Step {last.get('step', len(history))}: "
-                        f"{last.get('operation', 'ACTION')} -> {last.get('action', 'unknown')}{text_info} "
-                        f"(Conf: {last.get('confidence', 0.0):.2f}, Latency: {last.get('latency_ms', 0)}ms)"
-                    )
-
-                # Check for deadlock / blocked condition
-                if agent.state.get("status") == "blocked" and has_supervisor:
-                    if supervisor_interventions >= max_supervisor_retries:
-                        print("🛑 Maximum supervisor retries reached; stopping.")
+                if agent.state.get("status") != "blocked":
+                    if len(agent.state.get("history", [])) >= max_steps:
+                        print(f"\n🛑 Reached maximum step limit ({max_steps}); stopping.")
                         break
 
-                    supervisor_interventions += 1
-                    print(
-                        f"\n⚠️  Deadlock detected! Calling GLM Supervisor "
-                        f"(#{supervisor_interventions}/{max_supervisor_retries})..."
-                    )
+                    # The agent raises on budget exhaustion, provider errors, and text-helper
+                    # failures. Surface them as a loop failure instead of an uncaught traceback.
+                    try:
+                        agent.command("tick")
+                    except (ValueError, RuntimeError) as error:
+                        print(f"\n🛑 Loop aborted: {error}")
+                        break
 
-                    # Fresh observation before diagnosis (avoiding stale screenshot)
-                    fresh_page = agent.browser.observe(screenshot=True)
-                    screenshot_b64 = fresh_page["screenshot"]
-
-                    diagnosis = supervisor.diagnose(
-                        screenshot_b64=screenshot_b64,
-                        goal=goal,
-                        recent_actions=agent.state.get("history", []),
-                    )
-                    stuck_reason = diagnosis.get("stuck_reason", "Unknown obstacle")
-                    action_type = diagnosis.get("action_type", "HUMAN_INTERVENTION")
-                    can_recover = diagnosis.get("can_auto_recover", False)
-
-                    print(f"🧠 Supervisor Diagnosis: {stuck_reason}")
-                    print(f"🔧 Recommended Action : {action_type} (Auto-recover: {can_recover})")
-
-                    if diagnosis.get("rejected_action_type"):
+                    # Realtime action telemetry with safe get() access
+                    history = agent.state.get("history", [])
+                    if history:
+                        last = history[-1]
+                        text_val = last.get("text")
+                        text_info = f" [Typed: '{text_val}']" if text_val else ""
+                        confidence = last.get("confidence") or 0.0
                         print(
-                            f"🛡️  SAFETY ALERT: LLM recommendation '{diagnosis.get('rejected_action_type')}' "
-                            f"(target: '{diagnosis.get('rejected_target_text')}') was REJECTED by security policy."
+                            f"⏱️  [{last.get('elapsed_ms', 0)}ms] Step {last.get('step', len(history))}: "
+                            f"{last.get('operation', 'ACTION')} -> {last.get('action', 'unknown')}{text_info} "
+                            f"(Conf: {confidence:.2f}, Latency: {last.get('latency_ms', 0)}ms)"
                         )
 
-                    recovered = False
-                    if can_recover:
-                        recovered = supervisor.apply_recovery(agent.browser, diagnosis)
-
-                    if recovered:
-                        print("✅ Recovery action applied! Resuming agent loop and injecting feedback for Jev...")
-                        agent.resume(
-                            reason=stuck_reason,
-                            action_type=action_type,
-                            note=diagnosis.get("target_text") or diagnosis.get("key_name") or "",
-                        )
+                    if agent.state.get("status") != "blocked":
                         continue
-                    else:
-                        print("❌ Recovery could not be automatically applied or was rejected by safety policy.")
-                        if supervisor_interventions < max_supervisor_retries:
-                            time.sleep(0.5)
-                            continue
-                        break
+
+                # Deadlock. Without a supervisor there is nothing left to try.
+                if not has_supervisor:
+                    break
+                if supervisor_interventions >= max_supervisor_retries:
+                    print("🛑 Maximum supervisor retries reached; stopping.")
+                    break
+
+                supervisor_interventions += 1
+                print(
+                    f"\n⚠️  Deadlock detected! Calling GLM Supervisor "
+                    f"(#{supervisor_interventions}/{max_supervisor_retries})..."
+                )
+
+                # Fresh observation before diagnosis (avoiding stale screenshot)
+                fresh_page = agent.browser.observe(screenshot=True)
+                screenshot_b64 = fresh_page["screenshot"]
+
+                diagnosis = supervisor.diagnose(
+                    screenshot_b64=screenshot_b64,
+                    goal=goal,
+                    recent_actions=agent.state.get("history", []),
+                )
+                stuck_reason = diagnosis.get("stuck_reason", "Unknown obstacle")
+                action_type = diagnosis.get("action_type", "HUMAN_INTERVENTION")
+                can_recover = diagnosis.get("can_auto_recover", False)
+
+                print(f"🧠 Supervisor Diagnosis: {stuck_reason}")
+                print(f"🔧 Recommended Action : {action_type} (Auto-recover: {can_recover})")
+
+                if diagnosis.get("rejected_action_type"):
+                    print(
+                        f"🛡️  SAFETY ALERT: LLM recommendation '{diagnosis.get('rejected_action_type')}' "
+                        f"(target: '{diagnosis.get('rejected_target_text')}') was REJECTED by security policy."
+                    )
+
+                recovered = False
+                if can_recover:
+                    recovered = supervisor.apply_recovery(agent.browser, diagnosis)
+
+                if recovered:
+                    print("✅ Recovery action applied! Resuming agent loop and injecting feedback for Jev...")
+                    agent.resume(
+                        reason=stuck_reason,
+                        action_type=action_type,
+                        note=diagnosis.get("target_text") or diagnosis.get("key_name") or "",
+                    )
+                    continue
+
+                print("❌ Recovery could not be automatically applied or was rejected by safety policy.")
+                if supervisor_interventions >= max_supervisor_retries:
+                    break
+                # Still blocked. The page may settle, so re-diagnose until the retry cap.
+                time.sleep(0.5)
 
             # Final outcome handling
             total_time = round((time.perf_counter() - start_time), 2)
