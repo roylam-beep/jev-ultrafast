@@ -36,19 +36,31 @@ class Browser:
         # Events only arrive while the domain is on. Enabling once here keeps every
         # later wait at zero extra protocol calls.
         self.network_enabled = False
+        self.traffic = None
         try:
             self.call("Network.enable")
             self.network_enabled = True
+            # Subscribed for the session, not for the wait: any consumer's pump moves the
+            # daemon's whole buffer, so a recording run's screencast thread would otherwise
+            # discard the requests that started before the WAIT decision was even made.
+            # waits imports StalePage from here, so the import is local.
+            from .waits import network_subscription
+
+            self.traffic = network_subscription(self.session)
         except RuntimeError:
             pass  # A bridge without the Network domain still runs; waits fall back to time.
-        # Page.navigate returns once the navigation commits, so readyState already
-        # describes the new document. No document-identity check is needed here.
-        self.call("Page.navigate", url=url)
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            if self.evaluate("document.readyState") == "complete":
-                break
-            time.sleep(0.02)
+        try:
+            # Page.navigate returns once the navigation commits, so readyState already
+            # describes the new document. No document-identity check is needed here.
+            self.call("Page.navigate", url=url)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if self.evaluate("document.readyState") == "complete":
+                    break
+                time.sleep(0.02)
+        except Exception:
+            self.close()  # A session that never opened still owns a tab and a subscription.
+            raise
 
     def call(self, method, **params):
         return cdp(method, session_id=self.session, **params)
@@ -129,6 +141,9 @@ class Browser:
         return result
 
     def close(self):
+        if self.traffic:
+            self.traffic.close()
+            self.traffic = None
         if self.target:
             cdp("Target.closeTarget", targetId=self.target)
             self.target = None
