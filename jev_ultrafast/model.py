@@ -1,4 +1,4 @@
-"""TypeSafe makes choices; an optional small OpenAI-compatible model writes field values."""
+"""The policy makes choices; an optional small OpenAI-compatible model writes field values."""
 
 import json
 import math
@@ -8,14 +8,21 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .questions import NEXT_ACTION, TARGET, TEXT_VALUE
+from .questions import CHOICE_POLICY, NEXT_ACTION, TARGET, TEXT_VALUE
 
 CLIENT = httpx.Client(http2=True, timeout=25)
 
 # The shipped configuration in .env.example. Keep these, the README, and the inspector in step.
-DEFAULT_TYPESAFE_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
-DEFAULT_TEXT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-DEFAULT_TEXT_MODEL = "glm-5.3-flash"
+DEFAULT_TYPESAFE_ENDPOINT = "https://openrouter.ai/api/v1"
+DEFAULT_TYPESAFE_MODEL = "zhipu/glm-5.3-flash"
+# TypeSafe's own choice API, for TYPESAFE_ENDPOINT when running Jev instead of a chat model.
+DEFAULT_TYPESAFE_CHOICE_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
+DEFAULT_TEXT_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_TEXT_MODEL = "zhipu/glm-5.3-flash"
+# TypeSafe's own choice API answers every question in one constrained request. Any other
+# OpenAI-compatible provider is reached through chat completions, which returns free-form
+# JSON, so the answers it gives are validated against the same observed ids either way.
+TYPESAFE_CHOICE_HOSTS = ("typesafe.ai",)
 
 
 class MissingFieldValue(ValueError):
@@ -47,6 +54,104 @@ def post_json(url, key, body):
             raise RuntimeError(f"Model provider returned HTTP {response.status_code}; no action executed.")
         return response.json()
     raise RuntimeError("Model unavailable")
+
+
+def provider(base):
+    host = (urlparse(base).hostname or "").lower()
+    if host.endswith("openrouter.ai"):
+        return "openrouter"
+    if host.endswith("bigmodel.cn") or host.endswith("z.ai"):
+        return "zhipu"
+    if host == "api.deepseek.com" or host.endswith(".deepseek.com"):
+        return "deepseek"
+    return "generic"
+
+
+def reasoning_payload(proto, setting):
+    """Each provider spells the thinking switch differently; an explicit setting always wins."""
+    setting = (setting or "").lower()
+    if setting == "none":
+        return {"reasoning": {"enabled": False}}
+    if setting == "omit":
+        return {}
+    if setting == "enabled":
+        return {"thinking": {"type": "enabled"}}
+    if setting == "disabled":
+        return {"thinking": {"type": "disabled"}}
+    if proto == "deepseek":
+        return {"thinking": {"type": "disabled"}}
+    if proto == "openrouter":
+        return {"reasoning": {"effort": "low"}}
+    return {}
+
+
+def spread_probabilities(ids, choice, confidence):
+    """A chat model reports one choice, not a distribution over every observed id.
+
+    The inspector and traces expect a distribution, so the reported confidence stays on the
+    selected id and the remainder is spread evenly. These are derived from one number, not
+    measured per-element likelihoods -- docs/performance.md keeps the two sources apart.
+    """
+    ids = list(ids)
+    if not ids:
+        return {}
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        confidence = 0.5
+    if not math.isfinite(confidence):
+        confidence = 0.5
+    # Below 1/len the selected id would stop being the maximum and fail validate_choice.
+    confidence = min(1.0, max(confidence, 1.0 / len(ids)))
+    others = [i for i in ids if i != choice]
+    share = (1.0 - confidence) / len(others) if others else 0.0
+    probabilities = dict.fromkeys(others, share)
+    probabilities[choice] = confidence if others else 1.0
+    return probabilities, confidence
+
+
+def chat_answers(base, key, model, body, setting):
+    """Answer every question in one chat request for providers without TypeSafe's choice API.
+
+    Same contract as the choice API: one round trip, one key per question, and choices that
+    must already exist in the observed criteria. validate_choice rejects anything else.
+    """
+    questions = body["questions"]
+    result = post_json(
+        base + "/chat/completions",
+        key,
+        {
+            "model": model,
+            "max_tokens": 2048,
+            "response_format": {"type": "json_object"},
+            **reasoning_payload(provider(base), setting),
+            "messages": [
+                {"role": "system", "content": CHOICE_POLICY},
+                {
+                    "role": "user",
+                    "content": json.dumps({"state": body["state"], "questions": questions}, ensure_ascii=False),
+                },
+            ],
+        },
+    )
+    try:
+        content = json.loads(result["choices"][0]["message"]["content"])
+        replies = content["answers"] if isinstance(content.get("answers"), dict) else content
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise ValueError("Invalid TypeSafe response; no action executed.") from None
+    answers = {}
+    for name, question in questions.items():
+        reply = replies.get(name)
+        if not isinstance(reply, dict):
+            continue
+        # str() only normalises how JSON spelled an index; an unobserved id still fails below.
+        choice = str(reply.get("choice"))
+        ids = list(question["criteria"])
+        if choice not in ids:
+            continue
+        probabilities, confidence = spread_probabilities(ids, choice, reply.get("confidence"))
+        answers[name] = {"choice": choice, "probabilities": probabilities, "confidence": confidence}
+    return {"answers": answers, "model": result.get("model", model), "usage": result.get("usage", {})}
 
 
 def validate_choice(answer, ids):
@@ -127,7 +232,7 @@ def choose(state, goal, history):
             "instructions": {"goal": goal, "operation": operation, "rules": [NEXT_ACTION, TARGET]},
         }
     body = {
-        "model": os.environ.get("TYPESAFE_MODEL", "jev-latest"),
+        "model": os.environ.get("TYPESAFE_MODEL") or DEFAULT_TYPESAFE_MODEL,
         "state": {
             "page": {k: state[k] for k in ("url", "title", "text")},
             "elements": elements,
@@ -142,7 +247,14 @@ def choose(state, goal, history):
         os.environ.get("TYPESAFE_ENDPOINT") or os.environ.get("TYPESAFE_BASE_URL"),
         DEFAULT_TYPESAFE_ENDPOINT,
     )
-    result = post_json(typesafe_endpoint, os.environ["TYPESAFE_API_KEY"], body)
+    key = os.environ["TYPESAFE_API_KEY"]
+    host = (urlparse(typesafe_endpoint).hostname or "").lower()
+    if any(host == h or host.endswith("." + h) for h in TYPESAFE_CHOICE_HOSTS):
+        result = post_json(typesafe_endpoint, key, body)
+    else:
+        result = chat_answers(
+            typesafe_endpoint, key, body["model"], body, os.environ.get("TYPESAFE_MODEL_REASONING")
+        )
     operation_answer = validate_choice(result["answers"].get("operation", {}), operations)
     operation = operation_answer["choice"]
     target = None
@@ -190,33 +302,7 @@ def field_text(context):
     base = endpoint(os.environ.get("TEXT_MODEL_BASE_URL"), DEFAULT_TEXT_BASE_URL)
     model = os.environ.get("TEXT_MODEL") or DEFAULT_TEXT_MODEL
 
-    host = (urlparse(base).hostname or "").lower()
-    if host.endswith("openrouter.ai"):
-        proto = "openrouter"
-    elif host.endswith("bigmodel.cn") or host.endswith("z.ai"):
-        proto = "zhipu"
-    elif host == "api.deepseek.com" or host.endswith(".deepseek.com"):
-        proto = "deepseek"
-    else:
-        proto = "generic"
-
-    reasoning_setting = os.environ.get("TEXT_MODEL_REASONING", "").lower()
-    if reasoning_setting == "none":
-        reasoning = {"reasoning": {"enabled": False}}
-    elif reasoning_setting == "omit":
-        reasoning = {}
-    elif reasoning_setting == "enabled":
-        reasoning = {"thinking": {"type": "enabled"}}
-    elif reasoning_setting == "disabled":
-        reasoning = {"thinking": {"type": "disabled"}}
-    elif proto == "zhipu":
-        reasoning = {}
-    elif proto == "deepseek":
-        reasoning = {"thinking": {"type": "disabled"}}
-    elif proto == "openrouter":
-        reasoning = {"reasoning": {"effort": "low"}}
-    else:
-        reasoning = {}
+    reasoning = reasoning_payload(provider(base), os.environ.get("TEXT_MODEL_REASONING"))
     started = time.perf_counter()
     result = post_json(
         base + "/chat/completions",

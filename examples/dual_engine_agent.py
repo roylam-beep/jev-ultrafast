@@ -15,6 +15,7 @@ import sys
 import time
 
 from jev_ultrafast import Agent, GLMSupervisor
+from jev_ultrafast.model import DEFAULT_TEXT_MODEL, DEFAULT_TYPESAFE_MODEL
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("dual_engine_agent")
@@ -31,8 +32,8 @@ def run_dual_engine(
     print("⚡ Starting Dual-Engine Ultrafast Browser Agent")
     print(f"🎯 Target URL : {url}")
     print(f"🎯 User Goal   : {goal}")
-    print(f"🤖 Action Model: {os.environ.get('TYPESAFE_MODEL', 'jev-latest')}")
-    print(f"🧠 Brain Model : {os.environ.get('TEXT_MODEL', 'glm-5.3-flash')} (Text & Vision)")
+    print(f"🤖 Action Model: {os.environ.get('TYPESAFE_MODEL') or DEFAULT_TYPESAFE_MODEL}")
+    print(f"🧠 Brain Model : {os.environ.get('TEXT_MODEL') or DEFAULT_TEXT_MODEL} (Text & Vision)")
     print(f"⏱️  Budget     : Max {max_steps} steps | Deadline {deadline_seconds}s")
     print("=" * 65)
 
