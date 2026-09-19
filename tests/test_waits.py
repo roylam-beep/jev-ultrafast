@@ -1,16 +1,20 @@
 """Offline contracts for the layered waits. No browser, no paid APIs."""
 
+import time
+
 import pytest
 
+from jev_ultrafast import events as event_bus
 from jev_ultrafast import waits
 from jev_ultrafast.browser import StalePage
 
 
 class FakeBrowser:
-    """The three members waits uses: call, evaluate, session."""
+    """The members waits uses: call, evaluate, session, and an optional traffic subscription."""
 
     def __init__(self, frame_url="https://example.test/", ready="complete", network=True):
         self.session = "S1"
+        self.traffic = None
         self.frame_url = frame_url
         self.ready = ready
         self.network = network
@@ -36,13 +40,24 @@ class FakeBrowser:
 
 
 def events(*batches):
-    """A drain_events stub that yields each batch once, then stays empty."""
+    """A `drain_events` stub that yields each batch once, then stays empty."""
     queue = list(batches)
     return lambda: queue.pop(0) if queue else []
 
 
 def network_event(method, request="r1", session="S1"):
     return {"method": method, "session_id": session, "params": {"requestId": request}}
+
+
+def screencast_frame(session="S1"):
+    return {"method": "Page.screencastFrame", "session_id": session, "params": {}}
+
+
+def recording_session(browser):
+    """A browser whose Network subscription is open, alongside a recorder's for frames."""
+    browser.network_enabled = True
+    browser.traffic = waits.network_subscription(browser.session)
+    return event_bus.subscribe(prefix="Page.screencastFrame", session=browser.session)
 
 
 def test_uncommitted_frame_is_not_a_loaded_document():
@@ -104,7 +119,7 @@ def test_a_document_swapping_mid_poll_is_waited_out():
 
 def test_network_idle_enables_the_domain_and_restores_it(monkeypatch):
     """Nothing delivers Network events until the domain is on."""
-    monkeypatch.setattr(waits, "drain_events", events())
+    monkeypatch.setattr(event_bus, "drain_events", events())
     browser = FakeBrowser()
     assert waits.wait_for_network_idle(browser, timeout=1, idle_ms=10) is True
     assert "Network.enable" in browser.calls
@@ -113,7 +128,7 @@ def test_network_idle_enables_the_domain_and_restores_it(monkeypatch):
 
 
 def test_network_idle_leaves_a_session_owned_domain_enabled(monkeypatch):
-    monkeypatch.setattr(waits, "drain_events", events())
+    monkeypatch.setattr(event_bus, "drain_events", events())
     browser = FakeBrowser()
     browser.network_enabled = True
     assert waits.wait_for_network_idle(browser, timeout=1, idle_ms=10) is True
@@ -123,13 +138,13 @@ def test_network_idle_leaves_a_session_owned_domain_enabled(monkeypatch):
 
 
 def test_an_unfinished_request_is_not_idle(monkeypatch):
-    monkeypatch.setattr(waits, "drain_events", events([network_event("Network.requestWillBeSent")]))
+    monkeypatch.setattr(event_bus, "drain_events", events([network_event("Network.requestWillBeSent")]))
     assert waits.wait_for_network_idle(FakeBrowser(), timeout=0.4, idle_ms=10) is False
 
 
 def test_a_finished_request_becomes_idle(monkeypatch):
     monkeypatch.setattr(
-        waits,
+        event_bus,
         "drain_events",
         events(
             [network_event("Network.requestWillBeSent")],
@@ -142,7 +157,7 @@ def test_a_finished_request_becomes_idle(monkeypatch):
 
 def test_a_failed_request_also_clears_in_flight(monkeypatch):
     monkeypatch.setattr(
-        waits,
+        event_bus,
         "drain_events",
         events([network_event("Network.requestWillBeSent")], [network_event("Network.loadingFailed")]),
     )
@@ -152,7 +167,7 @@ def test_a_failed_request_also_clears_in_flight(monkeypatch):
 def test_another_session_cannot_hold_this_one_busy(monkeypatch):
     """browser_harness filters to the daemon's active tab; the agent owns a background one."""
     monkeypatch.setattr(
-        waits,
+        event_bus,
         "drain_events",
         events([network_event("Network.requestWillBeSent", session="OTHER")]),
     )
@@ -160,7 +175,7 @@ def test_another_session_cannot_hold_this_one_busy(monkeypatch):
 
 
 def test_a_bridge_without_the_network_domain_still_returns(monkeypatch):
-    monkeypatch.setattr(waits, "drain_events", events())
+    monkeypatch.setattr(event_bus, "drain_events", events())
     browser = FakeBrowser(network=False)
     assert waits.wait_for_network_idle(browser, timeout=1, idle_ms=10) is True
     assert browser.network_enabled is False
@@ -184,10 +199,110 @@ def test_wait_for_function_wraps_the_expression():
 
 
 def test_load_state_dispatches(monkeypatch):
-    monkeypatch.setattr(waits, "drain_events", events())
+    monkeypatch.setattr(event_bus, "drain_events", events())
     browser = FakeBrowser()
     assert waits.wait_for_load_state(browser, "networkidle", timeout=1, idle_ms=10) is True
     assert "Network.enable" in browser.calls
     assert waits.wait_for_load_state(browser, "load", timeout=1) is True
     with pytest.raises(ValueError, match="Unknown load state"):
         waits.wait_for_load_state(browser, "commit")
+
+
+def test_a_request_that_started_before_the_wait_is_still_counted(monkeypatch):
+    """The recorder's drains run continuously; the traffic they pump must survive them."""
+    monkeypatch.setattr(
+        event_bus,
+        "drain_events",
+        events([network_event("Network.requestWillBeSent")], [screencast_frame()]),
+    )
+    browser = FakeBrowser()
+    recorder = recording_session(browser)
+    try:
+        recorder.drain()  # The capture thread pumps the buffer before the model chooses WAIT.
+        assert waits.wait_for_network_idle(browser, timeout=0.4, idle_ms=10) is False
+    finally:
+        recorder.close()
+        browser.traffic.close()
+
+
+def test_a_session_without_a_subscription_only_sees_the_wait_onward(monkeypatch):
+    """A bridge with no Network domain has no session subscription; the wait is all it gets."""
+    monkeypatch.setattr(
+        event_bus,
+        "drain_events",
+        events([network_event("Network.requestWillBeSent")], [screencast_frame()]),
+    )
+    recorder = event_bus.subscribe(prefix="Page.screencastFrame", session="S1")
+    try:
+        recorder.drain()
+        assert waits.wait_for_network_idle(FakeBrowser(), timeout=1, idle_ms=10) is True
+    finally:
+        recorder.close()
+
+
+def test_the_session_subscription_outlives_the_wait(monkeypatch):
+    """A wait borrows the session's subscription; closing it would lose the next wait's backlog."""
+    monkeypatch.setattr(event_bus, "drain_events", events())
+    browser = FakeBrowser()
+    recorder = recording_session(browser)
+    try:
+        assert waits.wait_for_network_idle(browser, timeout=1, idle_ms=10) is True
+        assert browser.traffic in event_bus._subscriptions
+    finally:
+        recorder.close()
+        browser.traffic.close()
+
+
+def test_a_borrowed_subscription_leaves_the_domain_alone(monkeypatch):
+    """The session enabled Network in its constructor; a wait must not disable it underneath."""
+    monkeypatch.setattr(event_bus, "drain_events", events())
+    browser = FakeBrowser()
+    recorder = recording_session(browser)
+    try:
+        waits.wait_for_network_idle(browser, timeout=1, idle_ms=10)
+        assert "Network.disable" not in browser.calls
+        assert browser.network_enabled is True
+    finally:
+        recorder.close()
+        browser.traffic.close()
+
+
+def test_a_pending_request_survives_any_length_of_backlog(monkeypatch):
+    """State, not events: a queue bound would evict this request's start long before the wait."""
+    settled = [
+        [
+            network_event("Network.requestWillBeSent", request=f"r{n}"),
+            network_event("Network.loadingFinished", request=f"r{n}"),
+        ]
+        for n in range(event_bus.MAX_QUEUED * 2)
+    ]
+    monkeypatch.setattr(
+        event_bus,
+        "drain_events",
+        events([network_event("Network.requestWillBeSent", request="pending")], *settled),
+    )
+    browser = FakeBrowser()
+    recorder = recording_session(browser)
+    try:
+        for _ in range(event_bus.MAX_QUEUED * 2 + 1):
+            recorder.drain()  # The capture thread pumps the whole flood before the model chooses WAIT.
+        assert browser.traffic.sink.in_flight == {"pending"}
+        assert waits.wait_for_network_idle(browser, timeout=0.3, idle_ms=10) is False
+    finally:
+        recorder.close()
+        browser.traffic.close()
+
+
+def test_a_quiet_session_returns_on_the_first_poll(monkeypatch):
+    """The state carries when traffic was last seen, so a long-quiet page pays nothing."""
+    monkeypatch.setattr(event_bus, "drain_events", events())
+    browser = FakeBrowser()
+    recorder = recording_session(browser)
+    try:
+        browser.traffic.sink.last_activity -= 1  # Last event a second ago.
+        started = time.monotonic()
+        assert waits.wait_for_network_idle(browser, timeout=1, idle_ms=250) is True
+        assert (time.monotonic() - started) * 1000 < 250
+    finally:
+        recorder.close()
+        browser.traffic.close()

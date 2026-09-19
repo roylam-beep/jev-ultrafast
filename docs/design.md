@@ -18,7 +18,7 @@ Freshness compares semantic state instead of counting DOM mutations. Before a cl
 
 Browser mutations are not retried by transport recovery. Completed execution is logged before the next observation, including when that observation encounters a navigation. An interrupted native-select evaluation stops because its change event may already have fired. Typing uses a browser select-all command followed by CDP text insertion, so existing input contents are replaced.
 
-The next observation waits for up to two animation frames or 50 ms after an interaction. Editable ARIA comboboxes instead wait for visible options, capped at 200 ms. This avoids paying for a prediction before autocomplete suggestions arrive. An explicit WAIT remains 100 ms; network loading is never fast-forwarded in the recording.
+The next observation waits for up to two animation frames or 50 ms after an interaction. Editable ARIA comboboxes instead wait for visible options, capped at 200 ms. This avoids paying for a prediction before autocomplete suggestions arrive. An explicit WAIT returns on the session's network going idle (250 ms quiet, 2 s ceiling) rather than on a fixed slice; network loading is never fast-forwarded in the recording. Its idle check and the recorder's screencast thread both read the daemon's CDP buffer, which drains destructively, so both subscribe to a single fan-out (`jev_ultrafast/events.py`) instead of draining it themselves. The idle check's subscription lasts the session and keeps the state its events imply -- what is still in flight -- so a request that started before the WAIT decision is counted however much traffic followed it.
 
 ## What changed after the first demo
 
