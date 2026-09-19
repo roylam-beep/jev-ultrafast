@@ -124,6 +124,74 @@ def main():
         assert value == "Generated", repr(value)
         assert any(a.get("role") == "option" for a in page["actions"])
         passed.append("real text input waits for asynchronous combobox suggestions")
+        # A control that paints over itself is still that control, and a click on that
+        # decoration reaches the same handler a person's click would. A separate overlay is
+        # not: that is exactly what a confused-deputy click lands on.
+        browser.evaluate("document.body.innerHTML=" + repr("""
+          <div id="wrap" onclick="window.hits=(window.hits||0)+1"
+               style="position:relative;width:200px;height:40px">
+            <button id="go" style="position:absolute;inset:0">Go</button>
+            <div id="deco" style="position:absolute;inset:0;background:#eee">promo</div>
+          </div>
+        """))
+        page = browser.observe(screenshot=False)
+        go = next(a for a in page["actions"] if a["label"] == "Go")
+        browser.act(go, page)
+        assert browser.evaluate("window.hits") == 1, "a control's own decoration blocked its click"
+        passed.append("a control's own decoration does not block clicking it")
+
+        browser.evaluate("document.querySelector('#deco').remove(); "
+                         "const c=document.createElement('div'); c.id='cover'; "
+                         "c.style.cssText='position:fixed;inset:0;z-index:9999;background:white'; "
+                         "document.body.append(c)")
+        page = browser.observe(screenshot=False)
+        go = next(a for a in page["actions"] if a["label"] == "Go")
+        try:
+            browser.act(go, page)
+        except (RuntimeError, StalePage):
+            pass
+        else:
+            raise AssertionError("Clicked through a page-covering overlay")
+        assert browser.evaluate("window.hits") == 1
+        passed.append("a page-covering overlay still blocks the click")
+
+        # Typing goes wherever focus is. A click that never reached the field must not report
+        # success -- the text would land somewhere else, or nowhere, and be recorded as done.
+        browser.evaluate("document.body.innerHTML=" + repr("""
+          <input id="search" aria-label="Search" value="kept" style="width:300px">
+        """) + "; document.querySelector('#search').addEventListener('mousedown',"
+               "e=>{e.preventDefault();document.body.focus();})")
+        page = browser.observe(screenshot=False)
+        field = next(a for a in page["actions"] if a["kind"] == "fill")
+        try:
+            browser.act(field, page, text="never typed")
+        except StalePage:
+            pass
+        else:
+            raise AssertionError("Reported a fill that never focused the field")
+        assert browser.evaluate("document.querySelector('#search').value") == "kept"
+        passed.append("a click that does not focus the field reports failure, not success")
+
+        # Component libraries hide the real checkbox and paint a label. Both the state and the
+        # clickable geometry have to come from somewhere other than the input's own box.
+        browser.evaluate("document.body.innerHTML=" + repr("""
+          <label class="cb"><input id="two" type="checkbox"
+             style="position:absolute;opacity:0;width:0;height:0"><span>2 rooms</span></label>
+          <button id="wrapped"><input id="inner" type="checkbox" checked
+             style="position:absolute;opacity:0;width:0;height:0">South district</button>
+        """))
+        page = browser.observe(screenshot=False)
+        boxed = next((a for a in page["actions"] if a["label"].strip() == "2 rooms"), None)
+        assert boxed is not None, "a label-wrapped checkbox was not indexed at all"
+        assert boxed["checked"] == "false", boxed
+        browser.act(boxed, page)
+        assert browser.evaluate("document.querySelector('#two').checked") is True
+        passed.append("a visually hidden checkbox is indexed and clicked through its label")
+
+        wrapped = next(a for a in page["actions"] if "South district" in a["label"])
+        assert wrapped["checked"] == "true", wrapped
+        passed.append("a checkbox wrapped in a button reports the state the user sees")
+
         browser.call("Page.navigate", url="about:blank")
         assert not browser.fresh(page, field)
         passed.append("navigation invalidates the old document")

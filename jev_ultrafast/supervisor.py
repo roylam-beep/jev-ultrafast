@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from .keyboard import press
-from .model import DEFAULT_TEXT_BASE_URL, DEFAULT_TEXT_MODEL, endpoint
+from .model import DEFAULT_TEXT_BASE_URL, DEFAULT_TEXT_MODEL, endpoint, provider, reasoning_payload
 from .pointer import click, scroll
 
 logger = logging.getLogger("jev_ultrafast.supervisor")
@@ -45,6 +45,10 @@ SAFE_CLICK_ZH = re.compile(
     r"^(同意|接受|確定|确定|關閉|关闭|知道了|繼續|继续|稍後|稍后|略過|略过|"
     r"允許|允许|我知道|我同意|我接受|好的|全部接受|全部同意|全部允許|全部允许|朕知道)"
 )
+# The most common dismiss control carries no word at all. Without this a supervisor that
+# correctly identifies a modal still cannot close it, and the run stays blocked on a banner.
+# One character only: anything longer has meaning and must pass the word patterns above.
+SAFE_CLICK_SYMBOL = re.compile(r"^[\u00d7\u2715\u2716\u2717\u2718\u2573xX]$")
 
 # Dangerous words that must never be auto-clicked (P0-1 Confused Deputy Protection)
 DANGEROUS_CLICK_PATTERNS = re.compile(
@@ -75,7 +79,7 @@ def screen_click_text(text: Any, *, limit: int, source: str) -> bool:
     if DANGEROUS_CLICK_PATTERNS.search(cleaned):
         logger.critical("SECURITY ALERT: Detected dangerous action in %s: %s", source, cleaned)
         return False
-    if not (SAFE_CLICK_EN.match(cleaned) or SAFE_CLICK_ZH.match(cleaned)):
+    if not (SAFE_CLICK_EN.match(cleaned) or SAFE_CLICK_ZH.match(cleaned) or SAFE_CLICK_SYMBOL.match(cleaned)):
         logger.warning("Rejected %s not matching safe recovery pattern: %s", source, cleaned)
         return False
     return True
@@ -142,6 +146,24 @@ def _settle(browser, max_timeout: float = 2.0, interval: float = 0.08) -> bool:
     logger.warning("_settle timed out after %.1fs", max_timeout)
     return False
 
+
+
+def _json_reply(data, what):
+    """Read the JSON body of a chat reply, or say why there is none.
+
+    A reasoning model can spend its whole output budget thinking and return content=None with
+    finish_reason='length'. Passing that straight to json.loads raises "the JSON object must be
+    str, bytes or bytearray, not NoneType", which says nothing about the cause, and the
+    supervisor then reports its own parse failure as the page's obstacle.
+    """
+    choice = (data.get("choices") or [{}])[0]
+    raw = (choice.get("message") or {}).get("content")
+    if not raw:
+        raise ValueError(
+            f"{what}: model returned no content (finish_reason="
+            f"{choice.get('finish_reason')!r}); raise max_tokens or disable reasoning."
+        )
+    return json.loads(raw)
 
 class GLMSupervisor:
     """Supervises Jev execution using GLM-5.3-Flash's native multimodal intelligence."""
@@ -248,9 +270,14 @@ class GLMSupervisor:
 
         payload = {
             "model": self.model,
-            "max_tokens": 512,
+            # The reply is a small fixed JSON object, but a reasoning model bills its thinking
+            # against the same budget and returns an empty answer once it runs out. Keep the
+            # thinking short and leave room for the answer. Not "off": some endpoints reject
+            # reasoning:{enabled:false} outright ("Reasoning is mandatory for this endpoint").
+            "max_tokens": 1024,
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
+            **reasoning_payload(provider(self.base_url), os.environ.get("VISION_MODEL_REASONING")),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -265,8 +292,7 @@ class GLMSupervisor:
             )
             resp.raise_for_status()
             data = resp.json()
-            raw_content = data["choices"][0]["message"]["content"]
-            parsed = json.loads(raw_content)
+            parsed = _json_reply(data, "Visual diagnosis")
             if not isinstance(parsed, dict):
                 raise ValueError(f"Expected JSON dict, got {type(parsed)}")
 
@@ -322,9 +348,14 @@ class GLMSupervisor:
 
         payload = {
             "model": self.model,
-            "max_tokens": 512,
+            # The reply is a small fixed JSON object, but a reasoning model bills its thinking
+            # against the same budget and returns an empty answer once it runs out. Keep the
+            # thinking short and leave room for the answer. Not "off": some endpoints reject
+            # reasoning:{enabled:false} outright ("Reasoning is mandatory for this endpoint").
+            "max_tokens": 1024,
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
+            **reasoning_payload(provider(self.base_url), os.environ.get("VISION_MODEL_REASONING")),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {
@@ -345,8 +376,7 @@ class GLMSupervisor:
             )
             resp.raise_for_status()
             data = resp.json()
-            raw_content = data["choices"][0]["message"]["content"]
-            parsed = json.loads(raw_content)
+            parsed = _json_reply(data, "Goal verification")
             if not isinstance(parsed, dict) or "satisfied" not in parsed:
                 raise ValueError(f"Invalid verification response format: {parsed}")
 

@@ -4,7 +4,7 @@ import base64
 import time
 from pathlib import Path
 
-from .browser import Browser, StalePage
+from .browser import Browser, StalePage, UnreachableTarget
 from .model import MissingFieldValue, action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
 
@@ -104,8 +104,8 @@ class Agent:
                 raise ValueError(f"Stopped at the {MAX_STEPS}-action demo budget")
             text, helper = None, None
             if action["kind"] == "fill":
-                if not state["browser"].fresh(page):
-                    raise StalePage("Page changed before text generation. Choose again.")
+                if not state["browser"].fresh(page, action):
+                    raise StalePage("The field changed before text generation. Choose again.")
                 context = field_context(state["goal"], action, page, state["history"])
                 if self.pending_text and self.pending_text[0] == context:
                     _, text, helper = self.pending_text
@@ -123,7 +123,41 @@ class Agent:
                     self.pending_text = (context, text, helper)
                     state["text_calls"].append({**helper, "field": action["label"], "value": text})
             # Browser.act checks freshness immediately before input, including after text generation.
-            state["browser"].act(action, page, text=text)
+            try:
+                state["browser"].act(action, page, text=text)
+            except UnreachableTarget as rejected:
+                # A refusal is an observation, not a non-event. Without it in the history the
+                # policy re-picks the same unreachable target every cycle and burns the whole
+                # model-call budget on one element; recorded, it can choose another route, and
+                # three in a row trip the no-progress stop below.
+                state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+                state["history"].append(
+                    {
+                        "step": len(state["history"]) + 1,
+                        "action": f"Rejected: {action['label']}",
+                        "kind": "rejected",
+                        "choice": selected,
+                        "probability": decision["probabilities"][selected],
+                        "confidence": decision["confidence"],
+                        "latency_ms": decision["latency_ms"],
+                        "text": str(rejected),
+                        "text_helper": helper["model"] if helper else None,
+                        "text_latency_ms": helper["latency_ms"] if helper else 0,
+                        "operation": decision["operation"],
+                        "target": decision["target"],
+                        "page_changed": False,
+                        "url": page["url"],
+                        "usage": decision["usage"],
+                        "executed_ms": state["elapsed_ms"],
+                        "elapsed_ms": state["elapsed_ms"],
+                    }
+                )
+                repeated = state["history"][-3:]
+                if len(repeated) == 3 and all(h["kind"] == "rejected" for h in repeated):
+                    state["status"] = "blocked"
+                    state["page"] = state["browser"].observe(screenshot=self.screenshots)
+                    return self.snapshot()
+                raise
             self.pending_text = None
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             # Record execution before observing. A stale post-action observation must not erase the action.
@@ -151,7 +185,9 @@ class Agent:
             state["page"] = state["browser"].observe(screenshot=self.screenshots)
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             state["history"][-1].update(
-                page_changed=state["page"]["fingerprint"] != page["fingerprint"],
+                # Progress, not mere difference: an animating page changes its fingerprint
+                # on its own and would report every action as a step forward.
+                page_changed=state["page"].get("progress_key") != page.get("progress_key"),
                 url=state["page"]["url"],
                 elapsed_ms=state["elapsed_ms"],
             )

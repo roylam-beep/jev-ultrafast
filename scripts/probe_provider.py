@@ -91,11 +91,13 @@ def main():
         os.environ.get("TYPESAFE_ENDPOINT") or os.environ.get("TYPESAFE_BASE_URL"),
         model.DEFAULT_TYPESAFE_ENDPOINT,
     )
-    protocol = "TypeSafe choice API" if model.uses_choice_api(policy_endpoint) else "OpenAI-compatible chat"
+    policy_model = os.environ.get("TYPESAFE_MODEL") or model.DEFAULT_TYPESAFE_MODEL
+    native = model.choice_url(policy_endpoint, policy_model)
+    protocol = f"native choice API at {native}" if native else "OpenAI-compatible chat"
     supervisor = GLMSupervisor()
 
     print("Configuration")
-    print(f"  policy   {policy_endpoint} | {os.environ.get('TYPESAFE_MODEL') or model.DEFAULT_TYPESAFE_MODEL}")
+    print(f"  policy   {policy_endpoint} | {policy_model}")
     print(f"           protocol: {protocol}")
     print(f"           key: {masked(os.environ.get('TYPESAFE_API_KEY'))}")
     text_base = model.endpoint(os.environ.get("TEXT_MODEL_BASE_URL"), model.DEFAULT_TEXT_BASE_URL)

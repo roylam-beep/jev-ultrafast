@@ -17,12 +17,15 @@ DEFAULT_TYPESAFE_ENDPOINT = "https://openrouter.ai/api/v1"
 DEFAULT_TYPESAFE_MODEL = "typesafe/jev-1.13"
 # TypeSafe's own choice API, for TYPESAFE_ENDPOINT when running Jev instead of a chat model.
 DEFAULT_TYPESAFE_CHOICE_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
+# OpenRouter serves a decisions model on its own path, outside the /v1 chat surface.
+OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 DEFAULT_TEXT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_TEXT_MODEL = "z-ai/glm-5.3-flash"
-# TypeSafe's own choice API answers every question in one constrained request. Any other
-# OpenAI-compatible provider is reached through chat completions, which returns free-form
-# JSON, so the answers it gives are validated against the same observed ids either way.
+# A choice API answers every question in one constrained request and returns a measured
+# distribution. Any other provider is reached through chat completions, which returns
+# free-form JSON, so the answers it gives are validated against the same observed ids either way.
 TYPESAFE_CHOICE_HOSTS = ("typesafe.ai",)
+DECISIONS_MODEL_PREFIXES = ("typesafe/",)
 
 
 class MissingFieldValue(ValueError):
@@ -56,10 +59,19 @@ def post_json(url, key, body):
     raise RuntimeError("Model unavailable")
 
 
-def uses_choice_api(url):
-    """TypeSafe answers the whole question set natively; anything else goes through chat."""
-    host = (urlparse(url).hostname or "").lower()
-    return any(host == h or host.endswith("." + h) for h in TYPESAFE_CHOICE_HOSTS)
+def choice_url(base, model_id):
+    """The URL that answers the whole question set natively, or "" to go through chat.
+
+    TypeSafe's own endpoint is already the full URL. OpenRouter routes a decisions model to
+    its decisions path and rejects that model on /chat/completions, so there the model id
+    decides, not the host -- the same host serves both protocols.
+    """
+    host = (urlparse(base).hostname or "").lower()
+    if any(host == h or host.endswith("." + h) for h in TYPESAFE_CHOICE_HOSTS):
+        return base
+    if host.endswith("openrouter.ai") and (model_id or "").startswith(DECISIONS_MODEL_PREFIXES):
+        return OPENROUTER_DECISIONS_URL
+    return ""
 
 
 def provider(base):
@@ -240,10 +252,20 @@ def choose(state, goal, history):
     body = {
         "model": os.environ.get("TYPESAFE_MODEL") or DEFAULT_TYPESAFE_MODEL,
         "state": {
-            "page": {k: state[k] for k in ("url", "title", "text")},
+            "page": {
+                **{k: state[k] for k in ("url", "title", "text")},
+                # Where we are in the document. Without it the policy has no ruler for a
+                # scroll: it cannot tell "one more screen" from "already past the bottom",
+                # and overshoots a target that has gone off the top of the viewport.
+                "scroll": {**state.get("scroll", {}), "viewport_height": state.get("h")},
+            },
             "elements": elements,
+            # The url belongs here too. A filter that applies by rewriting the query string
+            # leaves no other trace, so without it the policy cannot tell an applied filter
+            # from one it just switched back off.
             "recent_actions": [
-                {k: h.get(k) for k in ("action", "kind", "text", "page_changed")} for h in history[-10:]
+                {k: h.get(k) for k in ("action", "kind", "text", "page_changed", "url")}
+                for h in history[-10:]
             ],
         },
         "questions": questions,
@@ -254,8 +276,9 @@ def choose(state, goal, history):
         DEFAULT_TYPESAFE_ENDPOINT,
     )
     key = os.environ["TYPESAFE_API_KEY"]
-    if uses_choice_api(typesafe_endpoint):
-        result = post_json(typesafe_endpoint, key, body)
+    native = choice_url(typesafe_endpoint, body["model"])
+    if native:
+        result = post_json(native, key, body)
     else:
         result = chat_answers(
             typesafe_endpoint, key, body["model"], body, os.environ.get("TYPESAFE_MODEL_REASONING")

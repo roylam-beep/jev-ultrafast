@@ -144,6 +144,46 @@ def test_target_head_receives_control_state_and_full_next_step_rules(monkeypatch
     assert d["choice"] == "e3"
 
 
+def test_choice_url_routes_by_host_then_by_model():
+    # TypeSafe's endpoint is already the full URL, whatever model runs on it.
+    assert model.choice_url(model.DEFAULT_TYPESAFE_CHOICE_ENDPOINT, "jev-latest") == (
+        model.DEFAULT_TYPESAFE_CHOICE_ENDPOINT
+    )
+    # One OpenRouter host, two protocols: a decisions model is rejected on /chat/completions.
+    assert model.choice_url(model.DEFAULT_TYPESAFE_ENDPOINT, "typesafe/jev-1.13") == (
+        model.OPENROUTER_DECISIONS_URL
+    )
+    assert model.choice_url(model.DEFAULT_TYPESAFE_ENDPOINT, "z-ai/glm-5.3-flash") == ""
+    assert model.choice_url("https://api.deepseek.com", "typesafe/jev-1.13") == ""
+
+
+def test_shipped_default_reaches_the_decisions_path_with_measured_probabilities(monkeypatch):
+    calls = []
+
+    def post(url, _key, body):
+        calls.append((url, body))
+        return {
+            "model": "typesafe/jev-1.13-20260917",
+            "answers": {
+                "operation": choice(body["questions"]["operation"]["criteria"], "TYPE_TEXT"),
+                "type_text_target": choice(["1"], "1"),
+                "click_target": choice(["1", "2"], "2"),
+            },
+        }
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.delenv("TYPESAFE_ENDPOINT", raising=False)
+    monkeypatch.delenv("TYPESAFE_MODEL", raising=False)
+    monkeypatch.setattr(model, "post_json", post)
+    d = model.choose(page(), "Find a book", [])
+    assert len(calls) == 1
+    assert calls[0][0] == model.OPENROUTER_DECISIONS_URL
+    # The question set travels as the body, not wrapped in chat messages.
+    assert set(calls[0][1]["questions"]) == {"operation", "click_target", "type_text_target"}
+    assert "messages" not in calls[0][1]
+    assert d["operation"] == "TYPE_TEXT" and d["choice"] == "e1"
+
+
 def chat_reply(answers):
     return {"choices": [{"message": {"content": json.dumps({"answers": answers})}}], "model": "router/model"}
 
@@ -163,6 +203,8 @@ def test_chat_policy_answers_every_head_in_one_request(monkeypatch):
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
     monkeypatch.delenv("TYPESAFE_ENDPOINT", raising=False)
+    # A chat model on the shipped endpoint: the decisions path keys on the model, not the host.
+    monkeypatch.setenv("TYPESAFE_MODEL", "z-ai/glm-5.3-flash")
     monkeypatch.setattr(model, "post_json", post)
     d = model.choose(page(), "Find a book", [])
     assert len(calls) == 1
@@ -185,6 +227,8 @@ def test_chat_policy_rejects_a_key_the_page_never_offered(monkeypatch):
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
     monkeypatch.delenv("TYPESAFE_ENDPOINT", raising=False)
+    # A chat model on the shipped endpoint: the decisions path keys on the model, not the host.
+    monkeypatch.setenv("TYPESAFE_MODEL", "z-ai/glm-5.3-flash")
     monkeypatch.setattr(model, "post_json", post)
     with pytest.raises(ValueError, match="Invalid TypeSafe"):
         model.choose(page(), "Find a book", [])
@@ -197,6 +241,8 @@ def test_chat_policy_rejects_a_key_the_page_never_offered(monkeypatch):
 def test_chat_policy_rejects_unusable_replies(monkeypatch, content):
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
     monkeypatch.delenv("TYPESAFE_ENDPOINT", raising=False)
+    # A chat model on the shipped endpoint: the decisions path keys on the model, not the host.
+    monkeypatch.setenv("TYPESAFE_MODEL", "z-ai/glm-5.3-flash")
     monkeypatch.setattr(
         model, "post_json", Mock(return_value={"choices": [{"message": {"content": content}}]})
     )
@@ -495,3 +541,167 @@ def test_navigation_during_prediction_reobserves_without_action(runner):
     assert runner.state["status"] == "ready"
     assert runner.state["decision"] is None
     runner.state["browser"].act.assert_not_called()
+
+
+def decision_for(selected, operation="CLICK", target="1"):
+    return {
+        "choice": selected, "operation": operation, "target": target, "confidence": 0.9,
+        "probabilities": {selected: 1.0}, "operation_probabilities": {operation: 1.0},
+        "target_probabilities": {target: 1.0}, "target_confidence": 0.9,
+        "raw_answers": {}, "model": "test", "usage": {}, "latency_ms": 1, "request": {},
+    }
+
+
+def test_an_unreachable_target_is_recorded_and_three_in_a_row_stop_the_run(monkeypatch):
+    """Without the record the policy re-picks the same covered element until the budget dies."""
+    from unittest.mock import patch
+
+    from jev_ultrafast.browser import UnreachableTarget
+
+    observed = page()
+    with patch("jev_ultrafast.agent.Browser") as MockBrowser:
+        browser = MockBrowser.return_value
+        browser.observe.return_value = observed
+        browser.fresh.return_value = True
+        browser.act.side_effect = UnreachableTarget("covered")
+        monkeypatch.setattr(loop, "choose", lambda *a, **k: decision_for("e3"))
+        agent = loop.Agent("https://example.test/", "Find a book")
+        try:
+            for _ in range(3):
+                agent.command("tick")
+            history = agent.state["history"]
+            assert [h["kind"] for h in history] == ["rejected"] * 3
+            assert history[0]["action"] == "Rejected: Go"
+            # The policy reads recent actions; a refusal must not look like a successful step.
+            assert all(h["page_changed"] is False for h in history)
+            assert agent.state["status"] == "blocked"
+        finally:
+            agent.close()
+
+
+def test_a_stale_page_is_not_recorded_as_a_rejected_target(monkeypatch):
+    """A decision that merely aged out says nothing about whether the target is reachable."""
+    from unittest.mock import patch
+
+    from jev_ultrafast.browser import StalePage
+
+    with patch("jev_ultrafast.agent.Browser") as MockBrowser:
+        browser = MockBrowser.return_value
+        browser.observe.return_value = page()
+        browser.fresh.return_value = True
+        browser.act.side_effect = StalePage("the page moved on")
+        monkeypatch.setattr(loop, "choose", lambda *a, **k: decision_for("e3"))
+        agent = loop.Agent("https://example.test/", "Find a book")
+        try:
+            agent.command("tick")
+            assert agent.state["history"] == []
+            assert agent.state["status"] == "ready"
+        finally:
+            agent.close()
+
+
+def guard_value(scope_text, name="Go"):
+    """A guard as snapshot.js builds it: identity and state, then the scope's text last."""
+    return [7, "button", name, None, None, None, None, False, None, None, None, None, "/go", scope_text]
+
+
+def test_a_control_that_animates_its_own_surroundings_stays_operable(monkeypatch):
+    """A marquee or ticker rewrites the scope text on a timer; that is not a substitution."""
+    from jev_ultrafast.browser import Browser
+
+    browser = Browser.__new__(Browser)
+    observed = {"page_key": ["k"], "guards": {"20": guard_value("viewed 3 times")}}
+    action = {"kind": "click", "node": 20}
+
+    reads = iter([[["k"], guard_value("viewed 4 times")], [["k"], guard_value("viewed 5 times")]])
+    monkeypatch.setattr(Browser, "_guard", lambda self, node: next(reads))
+    assert browser.fresh(observed, action) is True
+
+
+def test_a_replaced_target_is_still_rejected_when_the_scope_is_volatile(monkeypatch):
+    """Falling back to identity must not forgive a different element in the same slot."""
+    from jev_ultrafast.browser import Browser
+
+    browser = Browser.__new__(Browser)
+    observed = {"page_key": ["k"], "guards": {"20": guard_value("viewed 3 times", name="Go")}}
+    action = {"kind": "click", "node": 20}
+
+    reads = iter([[["k"], guard_value("viewed 4 times", name="Buy")],
+                  [["k"], guard_value("viewed 5 times", name="Buy")]])
+    monkeypatch.setattr(Browser, "_guard", lambda self, node: next(reads))
+    assert browser.fresh(observed, action) is False
+
+
+def test_a_settled_disagreement_is_still_a_stale_target(monkeypatch):
+    """Two identical reads mean the page is not animating: the guard really did change."""
+    from jev_ultrafast.browser import Browser
+
+    browser = Browser.__new__(Browser)
+    observed = {"page_key": ["k"], "guards": {"20": guard_value("Total $10")}}
+    action = {"kind": "click", "node": 20}
+
+    reads = iter([[["k"], guard_value("Total $99")], [["k"], guard_value("Total $99")]])
+    monkeypatch.setattr(Browser, "_guard", lambda self, node: next(reads))
+    assert browser.fresh(observed, action) is False
+
+
+def test_progress_ignores_a_page_that_animates_itself():
+    """A carousel rewrites the text every second; that is not the agent making progress."""
+    from jev_ultrafast.browser import fingerprint, progress_key
+
+    before = page()
+    same_page_new_text = deepcopy(before)
+    same_page_new_text["text"] = "Search — 1,284 people viewing right now"
+    # fingerprint must notice (the observation really is different)...
+    assert fingerprint(same_page_new_text) != fingerprint(before)
+    # ...but nothing the agent did moved, so it is not progress.
+    assert progress_key(same_page_new_text) == progress_key(before)
+
+
+@pytest.mark.parametrize(
+    ("label", "mutate"),
+    [
+        ("a filter rewrote the query string", lambda s: s.update(url=s["url"] + "?section=105")),
+        ("the page scrolled", lambda s: s["scroll"].update(y=560)),
+        ("a control appeared", lambda s: s["actions"].append(
+            {"id": "e9", "kind": "click", "label": "South district", "node": 90})),
+    ],
+)
+def test_progress_notices_what_an_action_actually_moves(label, mutate):
+    from jev_ultrafast.browser import progress_key
+
+    before = page()
+    after = deepcopy(before)
+    mutate(after)
+    assert progress_key(after) != progress_key(before), label
+
+
+def test_the_policy_is_told_where_it_is_and_what_each_step_did(monkeypatch):
+    """Scroll position and the url of each past step: without them the policy is flying blind."""
+    sent = {}
+
+    def post(_url, _key, body):
+        sent.update(body)
+        return {
+            "model": "test",
+            "answers": {
+                "operation": choice(body["questions"]["operation"]["criteria"], "CLICK"),
+                "click_target": choice(["1", "2"], "2"),
+                "type_text_target": choice(["1"], "1"),
+            },
+        }
+
+    state = page()
+    state["scroll"] = {"y": 560, "height": 4200}
+    state["h"] = 780
+    history = [{"action": "South district", "kind": "click", "text": None,
+                "page_changed": True, "url": "https://example.test/?section=105"}]
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setenv("TYPESAFE_ENDPOINT", model.DEFAULT_TYPESAFE_CHOICE_ENDPOINT)
+    monkeypatch.setattr(model, "post_json", post)
+    model.choose(state, "Find a book", history)
+
+    scroll = sent["state"]["page"]["scroll"]
+    assert scroll == {"y": 560, "height": 4200, "viewport_height": 780}
+    assert sent["state"]["recent_actions"][0]["url"] == "https://example.test/?section=105"

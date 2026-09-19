@@ -10,6 +10,9 @@ Submit populated search fields before opening a result; a populated field alone 
 WAIT only when the needed control is absent/disabled, or submitted results are still loading.
 If Search/Submit is visible and the required fields are ready, CLICK it immediately.
 Recent WAIT actions are not evidence of loading. Prefer a useful visible control over WAIT.
+A recent action of kind "rejected" means that target could not be operated at all -- covered by
+an overlay, disabled, or gone. Never choose that target again; take a different element, a
+different operation, or a route that dismisses whatever covers it.
 DONE requires visible evidence that ALL requirements are satisfied. If asked to open a result,
 a matching link is not enough. BLOCKED means no supported operation can make progress."""
 

@@ -41,6 +41,18 @@
     }
     return null;
   };
+  // A custom checkbox hides the real input and paints its label instead. The input still
+  // holds the state and the identity, but it has no geometry to click -- the label is what a
+  // person points at. Both the snapshot and the executor must agree on which box that is,
+  // or an element gets indexed at one place and clicked at another.
+  cache.box=e=>{
+    if (!['checkbox','radio'].includes(e.type)) return e;
+    const own=e.getBoundingClientRect();
+    if (visible(e) && own.width>=2 && own.height>=2) return e;
+    const label=e.closest('label') ||
+      (e.id ? document.querySelector('label[for="'+CSS.escape(e.id)+'"]') : null);
+    return label || e;
+  };
   cache.pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     [...document.querySelectorAll('input,textarea,select')].filter(safe)
       .map(e=>[identity(e),e.value,e.checked,e.selectedIndex,e.disabled,e.readOnly])];
@@ -54,8 +66,10 @@
   };
   const actions=[];
   for (const e of document.querySelectorAll(selector)) {
-    if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
-    const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
+    if (!safe(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
+    const box=cache.box(e);
+    if (!visible(box)) continue;
+    const r=box.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
     if (!rname || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
     const base={node:identity(e),role:rname,label:name(e)||rname,
@@ -65,6 +79,13 @@
       if (value!==null) base[key]=value;
     }
     if (['checkbox','radio'].includes(e.type)) base.checked=String(e.checked);
+    // A component library wraps a real checkbox inside the button or link it renders. The
+    // state the user sees lives on that input, and without it the policy cannot tell an
+    // applied filter from an unapplied one -- so it toggles the same one on and off forever.
+    if (base.checked===undefined) {
+      const inner=e.querySelectorAll('input[type="checkbox"],input[type="radio"]');
+      if (inner.length===1) base.checked=String(inner[0].checked);
+    }
     if (e.tagName==='SELECT') {
       for (const o of e.options) if (!o.selected && !o.disabled && !o.closest('optgroup[disabled]'))
         actions.push({...base,kind:'select',value:o.value,

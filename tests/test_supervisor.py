@@ -739,3 +739,43 @@ def test_agent_resume_preserves_valid_operation_enum():
         assert last_action["probability"] is None
         assert agent.state["status"] == "ready"
         agent.close()
+
+
+def test_an_empty_reply_names_its_cause_instead_of_a_json_type_error():
+    """A reasoning model can spend the whole budget thinking and answer with content=None.
+
+    json.loads on that raises "the JSON object must be str, bytes or bytearray, not NoneType",
+    which the supervisor then reports as the page's obstacle -- its own failure dressed up as
+    a diagnosis.
+    """
+    from jev_ultrafast.supervisor import _json_reply
+
+    exhausted = {"choices": [{"message": {"content": None}, "finish_reason": "length"}]}
+    with pytest.raises(ValueError, match="no content"):
+        _json_reply(exhausted, "Visual diagnosis")
+    with pytest.raises(ValueError, match="finish_reason='length'"):
+        _json_reply(exhausted, "Visual diagnosis")
+
+    assert _json_reply({"choices": [{"message": {"content": '{"ok": true}'}}]}, "x") == {"ok": True}
+    with pytest.raises(ValueError, match="no content"):
+        _json_reply({}, "x")
+
+
+@pytest.mark.parametrize(
+    ("label", "allowed"),
+    [
+        # The most common dismiss control carries no word at all.
+        ("×", True), ("✕", True), ("✗", True), ("X", True), ("x", True),
+        ("同意", True), ("允許", True), ("Close", True), ("Not now", True),
+        # One character only: anything longer must still earn its way past the word patterns.
+        ("xx", False), ("X-ray machine", False),
+        # Recovery dismisses obstacles; advancing the task is the policy's job, not this one.
+        ("2房", False), ("搜尋", False), ("刷新列表", False),
+        # And the confused-deputy list still wins over every pattern above.
+        ("刪除", False), ("Buy now", False), ("Delete account", False), ("結帳", False),
+    ],
+)
+def test_only_dismissal_labels_may_be_auto_clicked(label, allowed):
+    from jev_ultrafast.supervisor import screen_click_text
+
+    assert screen_click_text(label, limit=40, source="target_text") is allowed
