@@ -90,6 +90,7 @@ def test_all_heads_are_one_request_and_only_matching_head_executes(monkeypatch):
         }
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setenv("TYPESAFE_ENDPOINT", model.DEFAULT_TYPESAFE_CHOICE_ENDPOINT)
     monkeypatch.setattr(model, "post_json", post)
     d = model.choose(page(), "Find a book", [])
     assert len(calls) == 1
@@ -109,6 +110,7 @@ def test_click_cannot_consume_a_text_target(monkeypatch):
         }
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setenv("TYPESAFE_ENDPOINT", model.DEFAULT_TYPESAFE_CHOICE_ENDPOINT)
     monkeypatch.setattr(model, "post_json", post)
     with pytest.raises(ValueError, match="Invalid TypeSafe"):
         model.choose(page(), "Find a book", [])
@@ -136,9 +138,84 @@ def test_target_head_receives_control_state_and_full_next_step_rules(monkeypatch
         }
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setenv("TYPESAFE_ENDPOINT", model.DEFAULT_TYPESAFE_CHOICE_ENDPOINT)
     monkeypatch.setattr(model, "post_json", post)
     d = model.choose(p, "Search with free cancellation", [])
     assert d["choice"] == "e3"
+
+
+def chat_reply(answers):
+    return {"choices": [{"message": {"content": json.dumps({"answers": answers})}}], "model": "router/model"}
+
+
+def test_chat_policy_answers_every_head_in_one_request(monkeypatch):
+    calls = []
+
+    def post(url, _key, body):
+        calls.append((url, body))
+        return chat_reply(
+            {
+                "operation": {"choice": "TYPE_TEXT", "confidence": 0.8},
+                "type_text_target": {"choice": "1", "confidence": 0.9},
+                "click_target": {"choice": "2", "confidence": 0.4},
+            }
+        )
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.delenv("TYPESAFE_ENDPOINT", raising=False)
+    monkeypatch.setattr(model, "post_json", post)
+    d = model.choose(page(), "Find a book", [])
+    assert len(calls) == 1
+    assert calls[0][0] == model.DEFAULT_TYPESAFE_ENDPOINT + "/chat/completions"
+    # The whole action space still travels in one request, as with the choice API.
+    sent = json.loads(calls[0][1]["messages"][1]["content"])
+    assert set(sent["questions"]) == {"operation", "click_target", "type_text_target"}
+    assert d["operation"] == "TYPE_TEXT" and d["choice"] == "e1"
+    assert abs(sum(d["target_probabilities"].values()) - 1) < 0.02
+
+
+def test_chat_policy_rejects_a_key_the_page_never_offered(monkeypatch):
+    def post(_url, _key, _body):
+        return chat_reply(
+            {
+                "operation": {"choice": "CLICK", "confidence": 0.9},
+                "click_target": {"choice": "999", "confidence": 0.9},
+            }
+        )
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.delenv("TYPESAFE_ENDPOINT", raising=False)
+    monkeypatch.setattr(model, "post_json", post)
+    with pytest.raises(ValueError, match="Invalid TypeSafe"):
+        model.choose(page(), "Find a book", [])
+
+
+@pytest.mark.parametrize(
+    "content",
+    ['{"answers": {"operation": "CLICK"}}', "not json", '{"answers": []}', '{"answers": {"operation": {}}}'],
+)
+def test_chat_policy_rejects_unusable_replies(monkeypatch, content):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.delenv("TYPESAFE_ENDPOINT", raising=False)
+    monkeypatch.setattr(
+        model, "post_json", Mock(return_value={"choices": [{"message": {"content": content}}]})
+    )
+    with pytest.raises(ValueError, match="Invalid TypeSafe"):
+        model.choose(page(), "Find a book", [])
+
+
+@pytest.mark.parametrize("confidence", [1.0, 0.5, 0.0, None, "high", float("nan")])
+def test_spread_probabilities_always_survives_validation(confidence):
+    ids = [str(i) for i in range(1, 8)]
+    probabilities, resolved = model.spread_probabilities(ids, "3", confidence)
+    model.validate_choice({"choice": "3", "confidence": resolved, "probabilities": probabilities}, ids)
+
+
+def test_reasoning_setting_overrides_the_provider_default():
+    assert model.reasoning_payload("openrouter", None) == {"reasoning": {"effort": "low"}}
+    assert model.reasoning_payload("openrouter", "omit") == {}
+    assert model.reasoning_payload("zhipu", None) == {}
+    assert model.provider("https://openrouter.ai/api/v1") == "openrouter"
 
 
 def test_quoted_task_text_still_uses_the_llm(monkeypatch):
@@ -264,6 +341,22 @@ def test_interrupted_dropdown_mutation_cannot_be_retried_as_stale(monkeypatch, r
     with pytest.raises(RuntimeError, match="Dropdown execution"):
         browser_operation({"operation": "act", "session": "test", "action": {
             "id": "e1", "kind": "select", "node": 1, "value": "Design",
+        }})
+    assert cdp.call_count == 1
+
+
+@pytest.mark.parametrize("response", [{"exceptionDetails": {}}, {"exceptionDetails": {}, "result": {}}])
+def test_interrupted_scroll_cannot_be_retried_as_stale(monkeypatch, response):
+    """A wheel handler that navigates can destroy the context after the page moved."""
+    import jev_ultrafast.browser as browser
+
+    response = deepcopy(response)
+    response["exceptionDetails"] = {"text": "Execution context destroyed"}
+    cdp = Mock(return_value=response)
+    monkeypatch.setattr(browser, "cdp", cdp)
+    with pytest.raises(RuntimeError, match="Scroll execution was interrupted"):
+        browser_operation({"operation": "act", "session": "test", "action": {
+            "id": "scroll_down", "kind": "scroll", "delta": 560,
         }})
     assert cdp.call_count == 1
 
