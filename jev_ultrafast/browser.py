@@ -9,6 +9,7 @@ from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
 from .keyboard import key_events
+from .pointer import scroll_expression
 
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
@@ -161,7 +162,8 @@ def browser_operation(request):
         action = request["action"]
         kind = action["kind"]
         if kind == "scroll":
-            call("Input.dispatchMouseEvent", type="mouseWheel", x=550, y=650, deltaX=0, deltaY=action["delta"])
+            # CDP drops mouseWheel on a background target, and the agent owns one.
+            evaluate(scroll_expression(action["delta"]))
         elif kind != "wait":
             if type(action["node"]) is not int:
                 raise ValueError("Invalid observed node")
