@@ -268,6 +268,22 @@ def test_interrupted_dropdown_mutation_cannot_be_retried_as_stale(monkeypatch, r
     assert cdp.call_count == 1
 
 
+@pytest.mark.parametrize("response", [{"exceptionDetails": {}}, {"exceptionDetails": {}, "result": {}}])
+def test_interrupted_scroll_cannot_be_retried_as_stale(monkeypatch, response):
+    """A wheel handler that navigates can destroy the context after the page moved."""
+    import jev_ultrafast.browser as browser
+
+    response = deepcopy(response)
+    response["exceptionDetails"] = {"text": "Execution context destroyed"}
+    cdp = Mock(return_value=response)
+    monkeypatch.setattr(browser, "cdp", cdp)
+    with pytest.raises(RuntimeError, match="Scroll execution was interrupted"):
+        browser_operation({"operation": "act", "session": "test", "action": {
+            "id": "scroll_down", "kind": "scroll", "delta": 560,
+        }})
+    assert cdp.call_count == 1
+
+
 def test_fingerprint_tracks_values_and_identity_not_screenshots():
     p = page()
     other = deepcopy(p)

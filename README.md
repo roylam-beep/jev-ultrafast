@@ -125,6 +125,8 @@ To strictly defend against prompt injection and confused deputy attacks while re
 - **Send visible text.** Offscreen article bodies and footers do not fill the model context.
 - **Reuse an interrupted text request.** A generated value survives a stale-page retry only if the entire text-helper input is unchanged.
 
+A `SCROLL_UP` or `SCROLL_DOWN` dispatches a real `WheelEvent` at the viewport centre and performs the scroll, rather than a CDP `mouseWheel`. The agent owns a background target, and in this container's Chromium the first CDP wheel of a session reached the page once in six tries; the synthetic path reached it every time, costs the same one call, and reports whether the page actually moved. A page that calls `preventDefault()` on the wheel keeps the page in place, as a real wheel would. Nested scrollers stay outside this MVP.
+
 Replacing a field's text presses the platform select-all accelerator with its real key identity and the `selectAll` editing command, so a page that inspects the key event sees `keyCode` 65 rather than 0, and the selection still happens if the page swallows the event. Key dispatch is code-owned: the operation policy has no key operation, and the visual supervisor may only send the keys in its allowlist.
 
 Every executed target is resolved from an observed node. The executor rechecks page freshness and click occlusion. Model output never becomes selectors, coordinates, shell commands, or executable JavaScript. Text-helper output must parse as a small JSON object before typing. When the helper answers `{"text": null}` because the goal supplies no value, the run stops as `BLOCKED` instead of typing a guess.
@@ -139,6 +141,7 @@ Every executed target is resolved from an observed node. The executor rechecks p
 | [browser.py](jev_ultrafast/browser.py) | Browser connection, current geometry, execution |
 | [waits.py](jev_ultrafast/waits.py) | Document, network-idle, and predicate waits over the owned session |
 | [keyboard.py](jev_ultrafast/keyboard.py) | Key events with the identity a page expects, and editor commands |
+| [pointer.py](jev_ultrafast/pointer.py) | Click, wheel, hover and drag input over the owned session |
 | [model.py](jev_ultrafast/model.py) | Dynamic operation/target heads and text generation |
 | [questions.py](jev_ultrafast/questions.py) | Model instructions |
 | [demo.py](jev_ultrafast/demo.py) | Local inspector |
