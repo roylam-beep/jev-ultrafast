@@ -21,7 +21,9 @@ The original arm is the frozen source from `68c077bf79caca4e817b8e8a5854b2efa0c8
 
 ## Measurement boundary for `WAIT`
 
-Every measurement on this page was recorded when the `WAIT` operation was a fixed `time.sleep(0.1)`. Both the 7.073 s recording and the matched-comparison runs contain exactly one `WAIT` action, so each carries 100 ms of fixed sleep. `WAIT` now waits on the session's network going idle instead (250 ms quiet, 2 s ceiling), which can move a single action either way and removes the follow-up decision a still-loading page used to cost. The numbers below have not been re-recorded against that change.
+Every measurement on this page was recorded when the `WAIT` operation was a fixed `time.sleep(0.1)`, so each run carries fixed sleep that no longer exists. Per `wait_actions` in the raw JSON: the 7.073 s recording has one `WAIT`, so 100 ms; the six matched-comparison runs have three, three, three, two, two and two, so 200–300 ms each, and both headline medians (9.450 s baseline, 7.092 s optimized) come from runs with two.
+
+`WAIT` now waits on the session's network going idle instead (250 ms quiet, 2 s ceiling), which can move a single action either way and removes the follow-up decision a still-loading page used to cost. The numbers below have not been re-recorded against that change.
 
 ## Where the time went
 

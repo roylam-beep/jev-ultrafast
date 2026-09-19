@@ -93,28 +93,53 @@ An untrusted `WheelEvent` performs no default scroll, so the scroll is explicit 
 
 ## 3. Re-record the measurements
 
-Every number in `docs/` was recorded when `WAIT` was `time.sleep(0.1)`. Both the 7.073 s recording and the three matched-comparison runs contain **exactly one `WAIT` action**, so each carries 100 ms of fixed sleep that no longer exists.
+Every number in `docs/` was recorded when `WAIT` was `time.sleep(0.1)`, so each run carries fixed sleep that no longer exists. From `wait_actions` in the raw JSON:
 
-`README.md` and `docs/performance.md` currently carry an explicit note saying so. Re-record and you can delete the note.
+| Evidence | Runs | `WAIT` per run | Stale sleep carried |
+| --- | ---: | ---: | ---: |
+| `flights-measurement.json` (the 7.073 s video) | 1 | 1 | 100 ms |
+| `flights-prepared-measurement.json` | 1 | 1 | 100 ms |
+| `full-speed-measurement.json` (matched comparison) | 6 | 3, 3, 3, 2, 2, 2 | 200–300 ms |
+
+Both headline medians — 9.450 s baseline and 7.092 s optimized — come from runs with two `WAIT`s, so 200 ms each.
+
+`README.md` and `docs/performance.md` state this. Re-record and you can delete those paragraphs.
+
+These are two separate jobs. **3a is cheap and worth doing; 3b is six live runs across two revisions and may not be worth it.**
+
+### 3a. Re-record the demo → updates the 7.073 s claim
 
 ```bash
-# live measured run, original CDP timestamps retained
 uv run --env-file .env python scripts/record_flights.py artifacts/flights/rerecorded
-
-# render that verified run at 1x
 uv run python scripts/render_demo.py artifacts/flights/rerecorded
-
-# single measured run without the screencast, for the comparison table
-uv run --env-file .env python scripts/measure_flights.py
 ```
 
-Then update:
+`record_flights.py` takes the output folder positionally and uses `exist_ok=False`, so the path must not exist yet. Updates `docs/flights-measurement.json`, `docs/demo.mp4`, `docs/demo.gif`, and the 7.073 s figure in `README.md` and `docs/performance.md`.
 
-- `docs/flights-measurement.json`, `docs/full-speed-measurement.json`
-- the 7.073 s / 9.450→7.092 s / 1,092→101 numbers in `README.md` and `docs/performance.md`
-- delete the "recorded when WAIT was a fixed sleep" paragraph in both files
+### 3b. Rebuild the matched comparison → updates 9.450→7.092 s and 1,092→101
 
-**Costs paid API calls.** Also worth noting: the WAIT change can move a single action either way, but it removes the follow-up decision a still-loading page used to cost, so total time should not get worse.
+`docs/full-speed-measurement.json` is **six alternating runs across two source revisions** — three on `baseline_commit` `68c077b`, three on the candidate — not one measurement. `measure_flights.py` writes one run per invocation and **aggregates nothing**; the medians and the `summary` block in that file were computed by hand.
+
+So reproducing it means, at minimum:
+
+```bash
+# freeze the baseline revision somewhere separate
+git worktree add ../jev-baseline 68c077b
+
+# alternate the arms, one fresh output folder per run; --output is REQUIRED and uses exist_ok=False
+uv run --env-file .env python scripts/measure_flights.py --source ../jev-baseline --output artifacts/cmp/base-1
+uv run --env-file .env python scripts/measure_flights.py --source .                --output artifacts/cmp/cand-1
+uv run --env-file .env python scripts/measure_flights.py --source ../jev-baseline --output artifacts/cmp/base-2
+uv run --env-file .env python scripts/measure_flights.py --source .                --output artifacts/cmp/cand-2
+uv run --env-file .env python scripts/measure_flights.py --source ../jev-baseline --output artifacts/cmp/base-3
+uv run --env-file .env python scripts/measure_flights.py --source .                --output artifacts/cmp/cand-3
+```
+
+Then compute the per-arm medians of `elapsed_ms` and `cdp` yourself and write the `summary` block by hand, as the existing file was.
+
+`--source` does `sys.path.insert(0, source)` before importing `jev_ultrafast`, so it genuinely runs that revision's code and hashes that tree into `source_hashes`. The task itself — `URL`, `GOALS` and the independent `verify()` — always comes from the *current* checkout's `examples/flights.py`, which is what you want: both arms must run the same goal and be judged by the same checker.
+
+**Cheaper alternative:** leave the comparison numbers as historical and label them with the commit they describe (`68c077b` vs the then-current head), rather than re-running six live searches against Google Flights. The comparison was never about `WAIT` — it was about the snapshot rewrite.
 
 ### Tunables if the new WAIT feels wrong
 

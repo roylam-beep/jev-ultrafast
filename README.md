@@ -161,7 +161,7 @@ Every executed target is resolved from an observed node. The executor rechecks p
 
 ## Evidence and limits
 
-The recorded runs below predate the network-idle `WAIT`; each contains one `WAIT` action that cost a fixed 100 ms at the time. Re-recording needs a real Chrome and paid API calls.
+The recorded runs below predate the network-idle `WAIT`, so each carries fixed sleep that no longer exists: 100 ms in the 7.073 s recording, which has one `WAIT`, and 200–300 ms in the matched-comparison runs, which have two or three. Re-recording needs a real Chrome and paid API calls.
 
 The current video is a **7,073 ms** Google Flights run. Timing starts after initial page observation and includes model calls, generated text, browser work, stale decisions, and loading waits. A fresh independent check verifies the one-way setting, Zürich, London, September 20, 2026, and visible flight options. The video plays at 1×, with no opening hold and a 0.5-second final hold.
 
