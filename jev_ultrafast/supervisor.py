@@ -13,7 +13,16 @@ from typing import Any
 
 import httpx
 
+from .model import DEFAULT_TEXT_BASE_URL, DEFAULT_TEXT_MODEL, endpoint
+
 logger = logging.getLogger("jev_ultrafast.supervisor")
+
+# Serialising document.body.innerHTML costs megabytes per poll on a real page. These counters
+# are maintained by the engine, so a settle poll stays cheap on the sites the agent targets.
+SETTLE_PROBE = (
+    "(() => [document.readyState, document.getElementsByTagName('*').length, "
+    "document.documentElement.scrollHeight, document.title].join(':'))()"
+)
 
 # Security Whitelists & Patterns (P0-1 Prompt Injection Protection)
 ALLOWED_ACTIONS = {"CLICK_TEXT", "PRESS_KEY", "SCROLL", "RELOAD", "HUMAN_INTERVENTION"}
@@ -49,6 +58,33 @@ DANGEROUS_CLICK_PATTERNS = re.compile(
 )
 
 
+# The model proposes a short label; the DOM may resolve a longer accessible name.
+MAX_PROPOSED_CLICK_TEXT = 40
+MAX_RESOLVED_CLICK_TEXT = 200
+
+
+def screen_click_text(text: Any, *, limit: int, source: str) -> bool:
+    """Screens a click label against the length, blacklist, and safe-prefix policy.
+
+    Applied twice: once to the label the model proposes, and again to the text of the
+    element the DOM actually resolved. Screening only the proposal lets a safe prefix
+    stand in for an unsafe element (target "ok" resolving onto "Book now").
+    """
+    if not isinstance(text, str):
+        return False
+    cleaned = text.strip()
+    if not cleaned or len(cleaned) > limit:
+        logger.warning("Rejected %s with invalid length: %s", source, text)
+        return False
+    if DANGEROUS_CLICK_PATTERNS.search(cleaned):
+        logger.critical("SECURITY ALERT: Detected dangerous action in %s: %s", source, cleaned)
+        return False
+    if not (SAFE_CLICK_EN.match(cleaned) or SAFE_CLICK_ZH.match(cleaned)):
+        logger.warning("Rejected %s not matching safe recovery pattern: %s", source, cleaned)
+        return False
+    return True
+
+
 def validate_recovery_action(diagnosis: dict[str, Any]) -> bool:
     """Strictly validates supervisor recommendations to prevent prompt injection."""
     if not isinstance(diagnosis, dict):
@@ -70,20 +106,9 @@ def validate_recovery_action(diagnosis: dict[str, Any]) -> bool:
         return True
 
     if action_type == "CLICK_TEXT":
-        target = diagnosis.get("target_text")
-        if not isinstance(target, str):
-            return False
-        cleaned = target.strip()
-        if not cleaned or len(cleaned) > 40:
-            logger.warning("Rejected invalid target_text length: %s", target)
-            return False
-        if DANGEROUS_CLICK_PATTERNS.search(cleaned):
-            logger.critical("SECURITY ALERT: Detected dangerous action in target_text: %s", cleaned)
-            return False
-        if not (SAFE_CLICK_EN.match(cleaned) or SAFE_CLICK_ZH.match(cleaned)):
-            logger.warning("Rejected target_text not matching safe recovery pattern: %s", cleaned)
-            return False
-        return True
+        return screen_click_text(
+            diagnosis.get("target_text"), limit=MAX_PROPOSED_CLICK_TEXT, source="target_text"
+        )
 
     if action_type == "SCROLL":
         delta = diagnosis.get("scroll_delta")
@@ -103,10 +128,7 @@ def _settle(browser, max_timeout: float = 2.0, interval: float = 0.08) -> bool:
     end = time.perf_counter() + max_timeout
     while time.perf_counter() < end:
         try:
-            cur = browser.evaluate(
-                "(() => document.readyState + ':' + "
-                "(document.body ? document.body.innerHTML.length : 0))()"
-            )
+            cur = browser.evaluate(SETTLE_PROBE)
         except Exception as e:
             logger.warning("_settle evaluate failed: %s", e)
             return False
@@ -139,15 +161,16 @@ class GLMSupervisor:
             or os.environ.get("VISION_MODEL_API_KEY")
             or os.environ.get("TEXT_MODEL_API_KEY")
         )
-        self.base_url = (
-            base_url
-            or os.environ.get("VISION_MODEL_BASE_URL")
-            or os.environ.get("TEXT_MODEL_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
-        ).rstrip("/")
+        # Screenshots and a bearer token go to this endpoint, so validate it like the others.
+        self.base_url = endpoint(
+            base_url or os.environ.get("VISION_MODEL_BASE_URL") or os.environ.get("TEXT_MODEL_BASE_URL"),
+            DEFAULT_TEXT_BASE_URL,
+        )
         self.model = (
             model
             or os.environ.get("VISION_MODEL")
-            or os.environ.get("TEXT_MODEL", "glm-5.3-flash")
+            or os.environ.get("TEXT_MODEL")
+            or DEFAULT_TEXT_MODEL
         )
         self.client = httpx.Client(timeout=45)
 
@@ -438,16 +461,18 @@ class GLMSupervisor:
                 # 2. Fix checkVisibility boolean short-circuit bug.
                 # 3. Sort by smallest bounding rect area (prefer child button over full-page div container).
                 # 4. Hit-test via document.elementFromPoint to ensure element isn't covered by an overlay.
+                # 5. Anchor the match at the start of the label and return the resolved text, so the
+                #    blacklist screens the element actually clicked and not just the model's proposal.
                 script = f"""(() => {{
-                    const text = {json.dumps(target_text.lower())};
+                    const text = {json.dumps(target_text.strip().lower())};
                     const candidates = Array.from(document.querySelectorAll(
                         'button, a, [role="button"], input[type="button"], input[type="submit"], span, div, p'
                     ));
                     const hits = candidates.filter(el => {{
                         const fast = (el.textContent || '').trim().toLowerCase();
-                        if (!fast.includes(text)) return false;
+                        if (!fast.startsWith(text)) return false;
                         const c = (el.innerText || el.getAttribute('aria-label') || '').trim().toLowerCase();
-                        if (!c.includes(text)) return false;
+                        if (!c.startsWith(text)) return false;
                         if (el.checkVisibility && !el.checkVisibility()) return false;
                         const r = el.getBoundingClientRect();
                         return (
@@ -469,10 +494,19 @@ class GLMSupervisor:
                     const x = r.left + r.width / 2, y = r.top + r.height / 2;
                     const top = document.elementFromPoint(x, y);
                     if (!top || !(el === top || el.contains(top) || top.contains(el))) return null;
-                    return {{ x, y }};
+                    const resolved = (el.innerText || el.getAttribute('aria-label') || el.textContent || '')
+                        .trim().slice(0, {MAX_RESOLVED_CLICK_TEXT});
+                    return {{ x, y, text: resolved }};
                 }})()"""
                 coords = browser.evaluate(script)
                 if isinstance(coords, dict) and "x" in coords and "y" in coords:
+                    # Screen the element the DOM resolved, not only the label the model proposed.
+                    if not screen_click_text(
+                        coords.get("text"),
+                        limit=MAX_RESOLVED_CLICK_TEXT,
+                        source="resolved element text",
+                    ):
+                        return False
                     browser.call(
                         "Input.dispatchMouseEvent",
                         type="mousePressed",
