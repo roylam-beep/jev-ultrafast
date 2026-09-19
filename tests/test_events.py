@@ -177,3 +177,34 @@ def test_closing_twice_is_a_no_op(monkeypatch):
     traffic.close()
     traffic.close()
     assert event_bus._subscriptions == []
+
+
+def test_a_sink_receives_events_and_queues_nothing(monkeypatch):
+    """A consumer that keeps state instead of events cannot lose it to the bound."""
+    seen = []
+    monkeypatch.setattr(event_bus, "drain_events", batches([event("Network.requestWillBeSent")]))
+    with event_bus.subscribe(prefix="Network.", sink=seen.append) as traffic:
+        assert traffic.drain() == []
+        assert [e["method"] for e in seen] == ["Network.requestWillBeSent"]
+        assert traffic.dropped == 0
+
+
+def test_a_sink_is_fed_by_another_consumer_s_pump(monkeypatch):
+    """The recorder's pump is what keeps the network state current between waits."""
+    seen = []
+    monkeypatch.setattr(
+        event_bus,
+        "drain_events",
+        batches([event("Network.requestWillBeSent"), event("Page.screencastFrame")]),
+    )
+    with event_bus.subscribe(prefix="Network.", sink=seen.append), event_bus.subscribe(prefix="Page.") as recorder:
+        assert len(recorder.drain()) == 1
+        assert len(seen) == 1
+
+
+def test_pump_needs_no_consumer_of_its_own(monkeypatch):
+    monkeypatch.setattr(event_bus, "drain_events", batches([event("Network.requestWillBeSent")]))
+    seen = []
+    with event_bus.subscribe(prefix="Network.", sink=seen.append):
+        assert event_bus.pump() is None
+        assert len(seen) == 1

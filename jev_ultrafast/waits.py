@@ -21,7 +21,11 @@ corrections to the source were needed to make it report the truth here:
   the session's own (`Browser.traffic`), open from before the first navigation:
   a wait that subscribed only for its own duration would still miss every
   request that started before the model chose WAIT, because the recorder's
-  drains discard what nothing is subscribed to.
+  pumps discard what nothing is subscribed to.
+- What that subscription keeps is the state, not the events. A queue of events
+  can only be bounded or unbounded, and both lie here: bounded, a busy page
+  evicts the start of a request that is still pending and the next wait reports
+  idle over it; unbounded, one page grows it without limit.
 
 `wait_for_document_load` is the document layer. `Page.navigate` returns only
 once the navigation has committed, so the executor's own startup poll does not
@@ -29,11 +33,12 @@ need it; it is here for callers that navigate through page actions, where
 `until="domcontentloaded"` and the uncommitted-frame check both apply.
 """
 
+import threading
 import time
 from contextlib import contextmanager
 
 from .browser import StalePage
-from .events import subscribe
+from .events import pump, subscribe
 
 DEFAULT_TIMEOUT = 10.0
 DOCUMENT_TIMEOUT = 15.0
@@ -78,18 +83,57 @@ def _committed(browser):
     return (frame.get("url") or "") not in UNCOMMITTED
 
 
+class NetworkActivity:
+    """The session's live network state, folded from events as they are fanned out.
+
+    Holds what is in flight and when traffic was last seen, not the events that
+    said so, so it costs what is actually in flight and no backlog can evict a
+    request that has not settled.
+
+    Written from whichever thread pumps -- the recorder's capture thread, during
+    a recorded run -- and read by the agent's, so both go through its lock.
+    """
+
+    def __init__(self):
+        self.in_flight = set()
+        self.last_activity = time.monotonic()
+        self._lock = threading.Lock()
+
+    def __call__(self, event):
+        method = event.get("method", "")
+        request = (event.get("params") or {}).get("requestId")
+        with self._lock:
+            if method == IN_FLIGHT_STARTED:
+                self.in_flight.add(request)
+            elif method in IN_FLIGHT_SETTLED:
+                self.in_flight.discard(request)
+            self.last_activity = time.monotonic()
+
+    def idle(self, idle_ms):
+        """True when nothing is in flight and no event arrived for `idle_ms`."""
+        with self._lock:
+            quiet_ms = (time.monotonic() - self.last_activity) * 1000
+            return not self.in_flight and quiet_ms >= idle_ms
+
+
+def network_subscription(session):
+    """Open a session-long Network subscription that keeps its state, not its events."""
+    return subscribe(prefix="Network.", session=session, sink=NetworkActivity())
+
+
 @contextmanager
 def network_events(browser):
-    """Yield this session's Network subscription, enabling the domain if it is off.
+    """Yield this session's live network state, enabling the domain if it is off.
 
     Nothing delivers Network events until the domain is enabled, so an idle check
     without this reports idle having observed no traffic at all.
 
     A session that enabled the domain in its constructor also opened a
-    subscription there, and that one is used: it has been collecting since before
-    the page loaded, so a request that started before the WAIT decision is still
-    counted. Only a session without one (a bridge lacking the domain, a test
-    double) pays for a subscription that lives no longer than the wait.
+    subscription there, and that state is used: it has been accumulating since
+    before the page loaded, so a request that started before the WAIT decision is
+    still counted. Only a session without one (a bridge lacking the domain, a
+    test double) pays for a subscription that lives no longer than the wait, and
+    sees only what arrives during it.
     """
     owned = not getattr(browser, "network_enabled", False)
     if owned:
@@ -101,10 +145,10 @@ def network_events(browser):
     traffic = getattr(browser, "traffic", None)
     try:
         if traffic is not None:
-            yield traffic
+            yield traffic.sink
         else:
-            with subscribe(prefix="Network.", session=browser.session) as traffic:
-                yield traffic
+            with network_subscription(browser.session) as traffic:
+                yield traffic.sink
     finally:
         if owned:
             browser.network_enabled = False
@@ -117,30 +161,20 @@ def network_events(browser):
 def wait_for_network_idle(browser, timeout=DEFAULT_TIMEOUT, idle_ms=IDLE_MS):
     """Wait until nothing is in flight and no Network event arrived for `idle_ms`.
 
-    Returns True on an idle window, False on timeout. The subscription delivers
-    this session's Network events only; another tab's traffic cannot hold this
-    wait busy, and a concurrent consumer of the daemon's buffer cannot starve it.
+    Returns True on an idle window, False on timeout. The state is this session's
+    only; another tab's traffic cannot hold this wait busy, and a concurrent
+    consumer of the daemon's buffer cannot starve it.
 
-    The first drain carries the backlog since the last wait, so a request that
-    started before this call counts as in flight, and one that started and
-    finished before it cancels itself out. A backlog past the queue bound loses
-    its oldest events first, and a request's start is always older than its own
-    settle event, so a dropped pair cannot strand a request in flight here.
+    On a session subscription the state predates the call, so a request that
+    started before the WAIT decision still counts as in flight, one that started
+    and finished before it has already cancelled itself out, and a page that has
+    been quiet for longer than `idle_ms` returns on the first poll.
     """
     deadline = time.monotonic() + timeout
-    last_activity = time.monotonic()
-    in_flight = set()
-    with network_events(browser) as traffic:
+    with network_events(browser) as activity:
         while time.monotonic() < deadline:
-            for event in traffic.drain():
-                method = event.get("method", "")
-                request = (event.get("params") or {}).get("requestId")
-                if method == IN_FLIGHT_STARTED:
-                    in_flight.add(request)
-                elif method in IN_FLIGHT_SETTLED:
-                    in_flight.discard(request)
-                last_activity = time.monotonic()
-            if not in_flight and (time.monotonic() - last_activity) * 1000 >= idle_ms:
+            pump()  # Fans out into the sink; the state is current when this returns.
+            if activity.idle(idle_ms):
                 return True
             time.sleep(POLL)
     return False

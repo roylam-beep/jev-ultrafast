@@ -9,8 +9,6 @@ from pathlib import Path
 from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
-from .events import subscribe
-
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
@@ -40,10 +38,13 @@ class Browser:
         try:
             self.call("Network.enable")
             self.network_enabled = True
-            # Subscribed for the session, not for the wait: any consumer's drain moves the
+            # Subscribed for the session, not for the wait: any consumer's pump moves the
             # daemon's whole buffer, so a recording run's screencast thread would otherwise
             # discard the requests that started before the WAIT decision was even made.
-            self.traffic = subscribe(prefix="Network.", session=self.session)
+            # waits imports StalePage from here, so the import is local.
+            from .waits import network_subscription
+
+            self.traffic = network_subscription(self.session)
         except RuntimeError:
             pass  # A bridge without the Network domain still runs; waits fall back to time.
         try:

@@ -1,5 +1,7 @@
 """Offline contracts for the layered waits. No browser, no paid APIs."""
 
+import time
+
 import pytest
 
 from jev_ultrafast import events as event_bus
@@ -54,7 +56,7 @@ def screencast_frame(session="S1"):
 def recording_session(browser):
     """A browser whose Network subscription is open, alongside a recorder's for frames."""
     browser.network_enabled = True
-    browser.traffic = event_bus.subscribe(prefix="Network.", session=browser.session)
+    browser.traffic = waits.network_subscription(browser.session)
     return event_bus.subscribe(prefix="Page.screencastFrame", session=browser.session)
 
 
@@ -260,6 +262,47 @@ def test_a_borrowed_subscription_leaves_the_domain_alone(monkeypatch):
         waits.wait_for_network_idle(browser, timeout=1, idle_ms=10)
         assert "Network.disable" not in browser.calls
         assert browser.network_enabled is True
+    finally:
+        recorder.close()
+        browser.traffic.close()
+
+
+def test_a_pending_request_survives_any_length_of_backlog(monkeypatch):
+    """State, not events: a queue bound would evict this request's start long before the wait."""
+    settled = [
+        [
+            network_event("Network.requestWillBeSent", request=f"r{n}"),
+            network_event("Network.loadingFinished", request=f"r{n}"),
+        ]
+        for n in range(event_bus.MAX_QUEUED * 2)
+    ]
+    monkeypatch.setattr(
+        event_bus,
+        "drain_events",
+        events([network_event("Network.requestWillBeSent", request="pending")], *settled),
+    )
+    browser = FakeBrowser()
+    recorder = recording_session(browser)
+    try:
+        for _ in range(event_bus.MAX_QUEUED * 2 + 1):
+            recorder.drain()  # The capture thread pumps the whole flood before the model chooses WAIT.
+        assert browser.traffic.sink.in_flight == {"pending"}
+        assert waits.wait_for_network_idle(browser, timeout=0.3, idle_ms=10) is False
+    finally:
+        recorder.close()
+        browser.traffic.close()
+
+
+def test_a_quiet_session_returns_on_the_first_poll(monkeypatch):
+    """The state carries when traffic was last seen, so a long-quiet page pays nothing."""
+    monkeypatch.setattr(event_bus, "drain_events", events())
+    browser = FakeBrowser()
+    recorder = recording_session(browser)
+    try:
+        browser.traffic.sink.last_activity -= 1  # Last event a second ago.
+        started = time.monotonic()
+        assert waits.wait_for_network_idle(browser, timeout=1, idle_ms=250) is True
+        assert (time.monotonic() - started) * 1000 < 250
     finally:
         recorder.close()
         browser.traffic.close()
