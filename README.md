@@ -120,6 +120,7 @@ To strictly defend against prompt injection and confused deputy attacks while re
 - **One browser call per snapshot.** Read visible controls, their names, values, and text atomically. Keep references to the actual DOM nodes.
 - **Validate the selected target.** Clicks check the document, form values, target, and nearby context. Animation alone does not force another prediction. Resolve current geometry and reject covered controls before input.
 - **Wait for useful state.** After typing into a combobox, wait for visible suggestions, capped at 200 ms. Other interactions get at most two animation frames or 50 ms. These reads happen after execution is logged.
+- **Spend a WAIT on a signal, not a sleep.** A `WAIT` costs a decision, so it returns the moment the session's network goes quiet (250 ms with nothing in flight, 2 s ceiling) instead of sleeping a fixed slice and paying another decision to look again. The Network domain is enabled once per session, so a wait adds no protocol calls of its own.
 - **Keep hidden tabs rendering.** Focus emulation prevents background animation throttling without switching Chrome's visible tab.
 - **Send visible text.** Offscreen article bodies and footers do not fill the model context.
 - **Reuse an interrupted text request.** A generated value survives a stale-page retry only if the entire text-helper input is unchanged.
@@ -134,12 +135,15 @@ Every executed target is resolved from an observed node. The executor rechecks p
 | [supervisor.py](jev_ultrafast/supervisor.py) | Multimodal visual diagnosis, deadlock recovery, and goal verification via GLM-5.3-Flash |
 | [snapshot.js](jev_ultrafast/snapshot.js) | Atomic DOM snapshot, indexed controls, freshness guards |
 | [browser.py](jev_ultrafast/browser.py) | Browser connection, current geometry, execution |
+| [waits.py](jev_ultrafast/waits.py) | Document, network-idle, and predicate waits over the owned session |
 | [model.py](jev_ultrafast/model.py) | Dynamic operation/target heads and text generation |
 | [questions.py](jev_ultrafast/questions.py) | Model instructions |
 | [demo.py](jev_ultrafast/demo.py) | Local inspector |
 | [dual_engine_agent.py](examples/dual_engine_agent.py) | End-to-end dual-engine runner combining Jev reflex with GLM supervision |
 
 ## Evidence and limits
+
+The recorded runs below predate the network-idle `WAIT`; each contains one `WAIT` action that cost a fixed 100 ms at the time. Re-recording needs a real Chrome and paid API calls.
 
 The current video is a **7,073 ms** Google Flights run. Timing starts after initial page observation and includes model calls, generated text, browser work, stale decisions, and loading waits. A fresh independent check verifies the one-way setting, Zürich, London, September 20, 2026, and visible flight options. The video plays at 1×, with no opening hold and a 0.5-second final hold.
 
