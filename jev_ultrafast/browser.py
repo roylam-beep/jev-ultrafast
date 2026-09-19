@@ -46,14 +46,18 @@ class Browser:
             self.traffic = subscribe(prefix="Network.", session=self.session)
         except RuntimeError:
             pass  # A bridge without the Network domain still runs; waits fall back to time.
-        # Page.navigate returns once the navigation commits, so readyState already
-        # describes the new document. No document-identity check is needed here.
-        self.call("Page.navigate", url=url)
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            if self.evaluate("document.readyState") == "complete":
-                break
-            time.sleep(0.02)
+        try:
+            # Page.navigate returns once the navigation commits, so readyState already
+            # describes the new document. No document-identity check is needed here.
+            self.call("Page.navigate", url=url)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if self.evaluate("document.readyState") == "complete":
+                    break
+                time.sleep(0.02)
+        except Exception:
+            self.close()  # A session that never opened still owns a tab and a subscription.
+            raise
 
     def call(self, method, **params):
         return cdp(method, session_id=self.session, **params)
