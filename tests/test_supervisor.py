@@ -4,11 +4,14 @@ import json
 from unittest.mock import Mock, patch
 
 import httpx
+import pytest
 
-from jev_ultrafast.supervisor import GLMSupervisor, validate_recovery_action
+from jev_ultrafast.supervisor import GLMSupervisor, _settle, validate_recovery_action
 
 
-def test_supervisor_initialization(monkeypatch):
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    """Clean all model environment variables for deterministic isolated tests."""
     for k in (
         "VISION_MODEL_API_KEY",
         "VISION_MODEL_BASE_URL",
@@ -20,6 +23,8 @@ def test_supervisor_initialization(monkeypatch):
     ):
         monkeypatch.delenv(k, raising=False)
 
+
+def test_supervisor_initialization(monkeypatch):
     monkeypatch.setenv("TEXT_MODEL_API_KEY", "test-key")
     monkeypatch.setenv("TEXT_MODEL_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
     monkeypatch.setenv("TEXT_MODEL", "glm-5.3-flash")
@@ -90,7 +95,7 @@ def test_diagnose_success():
 
 
 def test_diagnose_rejects_prompt_injection():
-    """Security test: prompt injection attempt from web page must be rejected."""
+    """Security test: prompt injection attempt from web page must be rejected and recorded."""
     supervisor = GLMSupervisor(api_key="valid-key")
 
     mock_resp = Mock()
@@ -117,6 +122,8 @@ def test_diagnose_rejects_prompt_injection():
         res = supervisor.diagnose("fake_b64", "Find flights")
         assert res["can_auto_recover"] is False
         assert res["action_type"] == "HUMAN_INTERVENTION"
+        assert res["rejected_action_type"] == "CLICK_TEXT"
+        assert res["rejected_target_text"] == "Delete my account now"
     supervisor.close()
 
 
@@ -182,6 +189,121 @@ def test_verify_goal_achievement_success():
         audit = supervisor.verify_goal_achievement("fake_b64", "Find flights")
         assert audit["satisfied"] is True
         assert audit["confidence"] == 0.96
+    supervisor.close()
+
+
+def test_verify_goal_achievement_string_false_never_passes():
+    """B2 Fix: String 'false' must evaluate to boolean False, NOT True."""
+    supervisor = GLMSupervisor(api_key="valid-key")
+
+    mock_resp = Mock()
+    mock_resp.raise_for_status = Mock()
+    mock_resp.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "satisfied": "false",
+                            "confidence": 0.95,
+                            "explanation": "No flight options visible.",
+                        }
+                    )
+                }
+            }
+        ]
+    }
+
+    with patch.object(supervisor.client, "post", return_value=mock_resp):
+        audit = supervisor.verify_goal_achievement("fake_b64", "Find flights")
+        assert audit["satisfied"] is False
+        assert audit["confidence"] == 0.95
+    supervisor.close()
+
+
+def test_verify_goal_achievement_string_true_passes():
+    """B2 Fix: String 'true' evaluates to True when confidence >= 0.70."""
+    supervisor = GLMSupervisor(api_key="valid-key")
+
+    mock_resp = Mock()
+    mock_resp.raise_for_status = Mock()
+    mock_resp.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "satisfied": "true",
+                            "confidence": 0.85,
+                            "explanation": "Search results found.",
+                        }
+                    )
+                }
+            }
+        ]
+    }
+
+    with patch.object(supervisor.client, "post", return_value=mock_resp):
+        audit = supervisor.verify_goal_achievement("fake_b64", "Find flights")
+        assert audit["satisfied"] is True
+        assert audit["confidence"] == 0.88 or audit["confidence"] == 0.85
+    supervisor.close()
+
+
+def test_verify_goal_achievement_low_confidence_downgrades_to_none():
+    """B2 Fix: Low confidence (< 0.70) must downgrade satisfied to None."""
+    supervisor = GLMSupervisor(api_key="valid-key")
+
+    mock_resp = Mock()
+    mock_resp.raise_for_status = Mock()
+    mock_resp.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "satisfied": True,
+                            "confidence": 0.65,
+                            "explanation": "Uncertain if page completed.",
+                        }
+                    )
+                }
+            }
+        ]
+    }
+
+    with patch.object(supervisor.client, "post", return_value=mock_resp):
+        audit = supervisor.verify_goal_achievement("fake_b64", "Find flights")
+        assert audit["satisfied"] is None
+        assert audit["confidence"] == 0.65
+    supervisor.close()
+
+
+def test_verify_goal_achievement_invalid_type_downgrades_to_none():
+    """B2 Fix: Non-boolean, non-recognized string values evaluate to None."""
+    supervisor = GLMSupervisor(api_key="valid-key")
+
+    mock_resp = Mock()
+    mock_resp.raise_for_status = Mock()
+    mock_resp.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "satisfied": 42,
+                            "confidence": 0.90,
+                            "explanation": "Bad output.",
+                        }
+                    )
+                }
+            }
+        ]
+    }
+
+    with patch.object(supervisor.client, "post", return_value=mock_resp):
+        audit = supervisor.verify_goal_achievement("fake_b64", "Find flights")
+        assert audit["satisfied"] is None
     supervisor.close()
 
 
@@ -256,6 +378,25 @@ def test_apply_recovery_scroll_dynamic_viewport():
     supervisor.close()
 
 
+def test_apply_recovery_scroll_non_dict_fallback():
+    """Verify SCROLL safely falls back to default center when evaluate returns non-dict."""
+    supervisor = GLMSupervisor(api_key="valid-key")
+    mock_browser = Mock()
+    mock_browser.evaluate.return_value = None
+
+    diagnosis = {
+        "can_auto_recover": True,
+        "action_type": "SCROLL",
+        "scroll_delta": 300,
+    }
+
+    assert supervisor.apply_recovery(mock_browser, diagnosis) is True
+    mock_browser.call.assert_called_once_with(
+        "Input.dispatchMouseEvent", type="mouseWheel", x=550, y=400, deltaX=0, deltaY=300
+    )
+    supervisor.close()
+
+
 def test_apply_recovery_click_text_success():
     supervisor = GLMSupervisor(api_key="valid-key")
     mock_browser = Mock()
@@ -293,7 +434,107 @@ def test_apply_recovery_click_text_evaluate_none():
     supervisor.close()
 
 
-def test_validate_recovery_action_coverage():
+def test_settle_helper():
+    """Verify DOM settle helper checks readyState correctly."""
+    mock_browser = Mock()
+    mock_browser.evaluate.return_value = "complete"
+    assert _settle(mock_browser, max_timeout=0.1) is True
+
+    # Loading to complete
+    mock_browser.evaluate.side_effect = ["loading", "complete"]
+    assert _settle(mock_browser, max_timeout=0.2) is True
+
+    # Exception fallback
+    mock_browser.evaluate.side_effect = RuntimeError("CDP disconnect")
+    assert _settle(mock_browser, max_timeout=0.1) is True
+
+
+def test_validate_recovery_action_chinese_safe_patterns():
+    """B1 Fix: Chinese safe recovery buttons must be accepted without \\b word boundary failure."""
+    chinese_safe = [
+        "同意並繼續",
+        "同意全部",
+        "接受全部",
+        "接受全部 Cookie",
+        "確定",
+        "确定",
+        "關閉視窗",
+        "关闭",
+        "知道了",
+        "繼續操作",
+        "继续",
+        "稍後再說",
+        "稍后提醒",
+        "略過此步",
+        "略过",
+        "允許所有",
+        "允许",
+        "我知道了",
+        "好的",
+    ]
+    for text in chinese_safe:
+        assert validate_recovery_action({"action_type": "CLICK_TEXT", "target_text": text}), f"Failed on: {text}"
+
+
+def test_validate_recovery_action_chinese_dangerous_patterns_blocked():
+    """B1 Security: Dangerous operations in Chinese must NEVER pass even if starting with safe prefix."""
+    chinese_dangerous = [
+        "同意並刪除帳戶",
+        "同意並删除",
+        "接受並付款",
+        "確定結帳",
+        "确定结账",
+        "確定購買",
+        "确定购买",
+        "確定登出",
+        "確定轉帳",
+        "确定转账",
+        "確定下單",
+        "确定下单",
+        "確定註銷",
+    ]
+    for text in chinese_dangerous:
+        assert not validate_recovery_action(
+            {"action_type": "CLICK_TEXT", "target_text": text}
+        ), f"Allowed dangerous: {text}"
+
+
+def test_validate_recovery_action_english_patterns():
+    english_safe = [
+        "Accept all",
+        "Accept and continue",
+        "Agree to all cookies",
+        "Allow cookies",
+        "OK",
+        "Okay",
+        "Got it",
+        "Close modal",
+        "Dismiss banner",
+        "Continue",
+        "Confirm selection",
+        "Not now",
+        "Skip tutorial",
+        "No thanks",
+    ]
+    for text in english_safe:
+        assert validate_recovery_action({"action_type": "CLICK_TEXT", "target_text": text}), f"Failed on: {text}"
+
+    english_dangerous = [
+        "Accept and delete account",
+        "Confirm payment",
+        "Checkout now",
+        "Buy item",
+        "Transfer money",
+        "Logout",
+        "Sign out",
+    ]
+    for text in english_dangerous:
+        assert not validate_recovery_action(
+            {"action_type": "CLICK_TEXT", "target_text": text}
+        ), f"Allowed dangerous: {text}"
+
+
+def test_validate_recovery_action_edge_cases():
     assert not validate_recovery_action(None)
     assert not validate_recovery_action({})
     assert not validate_recovery_action({"action_type": "INVALID"})
@@ -304,3 +545,25 @@ def test_validate_recovery_action_coverage():
     assert not validate_recovery_action({"action_type": "SCROLL", "scroll_delta": 99999})
     assert validate_recovery_action({"action_type": "RELOAD"})
     assert validate_recovery_action({"action_type": "HUMAN_INTERVENTION"})
+
+
+def test_agent_resume_preserves_valid_operation_enum():
+    """P1: Verify resume records valid operation enum WAIT and supervisor_action."""
+    from jev_ultrafast.agent import Agent
+
+    with patch("jev_ultrafast.agent.Browser") as MockBrowser:
+        mock_instance = MockBrowser.return_value
+        mock_instance.observe.return_value = {
+            "url": "https://example.com",
+            "actions": [{"id": "wait", "kind": "wait", "label": "Wait"}],
+        }
+        agent = Agent("https://example.com", "Test goal")
+        agent.resume(reason="Cookie modal", action_type="CLICK_TEXT", note="Accept all")
+
+        last_action = agent.state["history"][-1]
+        assert last_action["operation"] == "WAIT"
+        assert last_action["supervisor_action"] == "CLICK_TEXT"
+        assert last_action["confidence"] is None
+        assert last_action["probability"] is None
+        assert agent.state["status"] == "ready"
+        agent.close()

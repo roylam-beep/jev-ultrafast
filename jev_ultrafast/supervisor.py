@@ -29,10 +29,15 @@ VIRTUAL_KEY_CODES = {
 }
 
 # Safe click patterns for recovery (dismissing modals, accepting cookies, closing banners)
-SAFE_CLICK_PATTERNS = re.compile(
-    r"^(accept|agree|allow|ok|okay|got it|close|dismiss|continue|confirm|not now|skip|no thanks|"
-    r"同意|接受|確定|确定|關閉|关闭|知道了|繼續|继续|稍後|稍后|略過|略过)\b",
+# In Python 3 \w matches Unicode word characters (including Chinese).
+# Therefore \b fails between Chinese characters (e.g. "同意並繼續").
+# English patterns require \b; Chinese patterns match safe prefix keywords.
+SAFE_CLICK_EN = re.compile(
+    r"^(accept|agree|allow|ok|okay|got it|close|dismiss|continue|confirm|not now|skip|no thanks)\b",
     re.I,
+)
+SAFE_CLICK_ZH = re.compile(
+    r"^(同意|接受|確定|确定|關閉|关闭|知道了|繼續|继续|稍後|稍后|略過|略过|允許|允许|我知道|好的)",
 )
 
 # Dangerous words that must never be auto-clicked (P0-1 Confused Deputy Protection)
@@ -74,7 +79,7 @@ def validate_recovery_action(diagnosis: dict[str, Any]) -> bool:
         if DANGEROUS_CLICK_PATTERNS.search(cleaned):
             logger.critical("SECURITY ALERT: Detected dangerous action in target_text: %s", cleaned)
             return False
-        if not SAFE_CLICK_PATTERNS.match(cleaned):
+        if not (SAFE_CLICK_EN.match(cleaned) or SAFE_CLICK_ZH.match(cleaned)):
             logger.warning("Rejected target_text not matching safe recovery pattern: %s", cleaned)
             return False
         return True
@@ -88,6 +93,24 @@ def validate_recovery_action(diagnosis: dict[str, Any]) -> bool:
     if action_type == "RELOAD":
         return True
 
+    return False
+
+
+def _settle(browser, max_timeout: float = 2.0) -> bool:
+    """Wait for document readyState and DOM to settle after recovery action."""
+    start = time.perf_counter()
+    while time.perf_counter() - start < max_timeout:
+        try:
+            ready = browser.evaluate("document.readyState")
+            if ready in {"complete", "interactive"}:
+                time.sleep(0.02)
+                return True
+            if not isinstance(ready, str):
+                # Non-string response (e.g. test mocks returning dict/None)
+                return True
+        except Exception:
+            return True
+        time.sleep(0.02)
     return False
 
 
@@ -219,6 +242,8 @@ class GLMSupervisor:
 
             # Validate against prompt injection
             if not validate_recovery_action(parsed):
+                parsed["rejected_action_type"] = parsed.get("action_type")
+                parsed["rejected_target_text"] = parsed.get("target_text")
                 parsed["can_auto_recover"] = False
                 parsed["action_type"] = "HUMAN_INTERVENTION"
 
@@ -294,9 +319,34 @@ class GLMSupervisor:
             parsed = json.loads(raw_content)
             if not isinstance(parsed, dict) or "satisfied" not in parsed:
                 raise ValueError(f"Invalid verification response format: {parsed}")
+
+            raw_satisfied = parsed.get("satisfied")
+            confidence = float(parsed.get("confidence", 0.0))
+
+            if isinstance(raw_satisfied, bool):
+                satisfied = raw_satisfied
+            elif isinstance(raw_satisfied, str):
+                cleaned_str = raw_satisfied.strip().lower()
+                if cleaned_str in {"true", "yes", "1"}:
+                    satisfied = True
+                elif cleaned_str in {"false", "no", "0"}:
+                    satisfied = False
+                else:
+                    satisfied = None
+            else:
+                satisfied = None
+
+            # Fail-closed: low-confidence audits downgrade to None (unverified)
+            if satisfied is not None and confidence < 0.7:
+                logger.warning(
+                    "Audit confidence too low (%.2f < 0.70); downgrading satisfied to None",
+                    confidence,
+                )
+                satisfied = None
+
             return {
-                "satisfied": bool(parsed["satisfied"]),
-                "confidence": float(parsed.get("confidence", 0.0)),
+                "satisfied": satisfied,
+                "confidence": confidence,
                 "explanation": str(parsed.get("explanation", "")),
             }
         except httpx.HTTPStatusError as e:
@@ -341,13 +391,15 @@ class GLMSupervisor:
                 )
                 time.sleep(0.05)
                 browser.call("Input.dispatchKeyEvent", type="keyUp", **common)
+                _settle(browser)
                 return True
 
             elif action_type == "SCROLL":
-                center = browser.evaluate("({x: window.innerWidth / 2, y: window.innerHeight / 2})") or {
-                    "x": 550,
-                    "y": 400,
-                }
+                raw_center = browser.evaluate("({x: window.innerWidth / 2, y: window.innerHeight / 2})")
+                if isinstance(raw_center, dict) and "x" in raw_center and "y" in raw_center:
+                    center = raw_center
+                else:
+                    center = {"x": 550, "y": 400}
                 delta = diagnosis.get("scroll_delta", 300)
                 browser.call(
                     "Input.dispatchMouseEvent",
@@ -358,6 +410,7 @@ class GLMSupervisor:
                     deltaY=int(delta),
                 )
                 time.sleep(0.1)
+                _settle(browser)
                 return True
 
             elif action_type == "CLICK_TEXT":
@@ -415,12 +468,13 @@ class GLMSupervisor:
                         button="left",
                         clickCount=1,
                     )
+                    _settle(browser)
                     return True
                 return False
 
             elif action_type == "RELOAD":
                 browser.call("Page.reload")
-                time.sleep(1.0)
+                _settle(browser, max_timeout=3.0)
                 return True
 
         except Exception as e:

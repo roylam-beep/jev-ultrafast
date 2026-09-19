@@ -9,11 +9,15 @@ Architecture:
 """
 
 import argparse
+import logging
 import os
 import sys
 import time
 
 from jev_ultrafast import Agent, GLMSupervisor
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("dual_engine_agent")
 
 
 def run_dual_engine(
@@ -97,6 +101,12 @@ def run_dual_engine(
                     print(f"🧠 Supervisor Diagnosis: {stuck_reason}")
                     print(f"🔧 Recommended Action : {action_type} (Auto-recover: {can_recover})")
 
+                    if diagnosis.get("rejected_action_type"):
+                        print(
+                            f"🛡️  SAFETY ALERT: LLM recommendation '{diagnosis.get('rejected_action_type')}' "
+                            f"(target: '{diagnosis.get('rejected_target_text')}') was REJECTED by security policy."
+                        )
+
                     recovered = False
                     if can_recover:
                         recovered = supervisor.apply_recovery(agent.browser, diagnosis)
@@ -125,27 +135,37 @@ def run_dual_engine(
             print(f"✍️  Text generation calls : {len(agent.state.get('text_calls', []))}")
             print(f"👁️  Supervisor Interventions: {supervisor_interventions}")
 
+            # Non-done final status (blocked, timeout, or aborted)
+            if final_status != "done":
+                print(f"🛑 Task did not reach 'done' status (final status: '{final_status}').")
+                print("=" * 65)
+                sys.exit(2)
+
             # Final visual audit if status is done (Fail-closed)
-            if final_status == "done":
-                if has_supervisor:
-                    print("\n🔍 Conducting final visual audit with GLM-5.3-Flash...")
-                    final_fresh = agent.browser.observe(screenshot=True)
-                    final_screen = final_fresh["screenshot"]
-                    audit = supervisor.verify_goal_achievement(final_screen, goal)
+            if not has_supervisor:
+                print("⚠️  Task marked done by Jev, but Visual Supervisor is disabled; audit UNAVAILABLE.")
+                print("🛑 Exiting with code 3 (unverified completion).")
+                print("=" * 65)
+                sys.exit(3)
 
-                    satisfied = audit.get("satisfied")
-                    verdict = {True: "PASS ✅", False: "FAIL ❌"}.get(satisfied, "UNVERIFIED ⚠️")
-                    print(f"📋 Visual Audit Result : {verdict}")
-                    print(f"🔍 Confidence Score    : {audit.get('confidence', 0.0):.2f}")
-                    print(f"💬 Explanation         : {audit.get('explanation')}")
+            print("\n🔍 Conducting final visual audit with GLM-5.3-Flash...")
+            final_fresh = agent.browser.observe(screenshot=True)
+            final_screen = final_fresh["screenshot"]
+            audit = supervisor.verify_goal_achievement(final_screen, goal)
 
-                    if satisfied is not True:
-                        print("❌ Goal was not visibly verified; exiting with non-zero status.")
-                        sys.exit(1)
-                else:
-                    print("⚠️  Task marked done by Jev, but Visual Supervisor is disabled; audit skipped.")
-
+            satisfied = audit.get("satisfied")
+            verdict = {True: "PASS ✅", False: "FAIL ❌"}.get(satisfied, "UNVERIFIED ⚠️")
+            print(f"📋 Visual Audit Result : {verdict}")
+            print(f"🔍 Confidence Score    : {audit.get('confidence', 0.0):.2f}")
+            print(f"💬 Explanation         : {audit.get('explanation')}")
             print("=" * 65)
+
+            if satisfied is not True:
+                print("❌ Goal was not visibly verified; exiting with code 1.")
+                sys.exit(1)
+
+            print("🎉 Task completed and visually verified successfully!")
+            sys.exit(0)
 
 
 def main():
