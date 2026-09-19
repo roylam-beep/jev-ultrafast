@@ -101,6 +101,18 @@ uv run --env-file .env python examples/dual_engine_agent.py \
   --goal "Find one-way flights from Zurich to London on September 20, 2026 for one adult in economy."
 ```
 
+#### Architectural Security, Fork Deviations & Privacy
+
+In upstream Jev, model output strictly never becomes coordinates or executable JavaScript. This fork introduces **System 2 (Visual Supervisor)** as an out-of-band diagnostic channel active only when System 1 reaches deadlock (`BLOCKED`).
+
+To strictly defend against prompt injection and confused deputy attacks while retaining emergency recovery capabilities:
+1. **Strict Action Whitelist**: Only `CLICK_TEXT`, `PRESS_KEY`, `SCROLL`, and `RELOAD` are accepted (`ALLOWED_ACTIONS`).
+2. **Bilingual Safe Click Patterns**: Button texts are constrained to predefined dismiss/consent patterns (`SAFE_CLICK_EN` with `\b` word boundary; `SAFE_CLICK_ZH` matching Chinese consent patterns like `同意並繼續`, `全部接受`, `我同意`).
+3. **Dangerous Keywords Blacklist**: Text containing `delete`, `pay`, `checkout`, `buy`, `transfer`, `logout` (and Chinese equivalents `刪除`, `付款`, `結帳`, `轉帳`, `登出`) is unconditionally rejected before pattern matching.
+4. **Viewport Bounds & DOM Stability**: `CLICK_TEXT` coordinates are strictly bounded within viewport dimensions (`r.top < window.innerHeight && r.left < window.innerWidth`), and `_settle` continuously monitors DOM stability before resuming the reflex loop.
+5. **Fail-Closed Outcome Verification**: Visual audits require `confidence >= 0.70` and non-`done` runs exit with deterministic non-zero codes (code 2 for loop failure, 3 for missing audit, 1 for unverified audit).
+6. **Privacy & Cost Controls**: Multimodal diagnostics transmit quality=72 JPEG screenshots to `VISION_MODEL_BASE_URL`. A maximum retry cap (`max_supervisor_retries=3`) limits session spend, and visual supervision can be completely turned off via `VISION_SUPERVISOR_ENABLED=false` for sensitive or authenticated sessions.
+
 ## Why it moves
 
 - **One request per decision cycle.** Operation and target heads share the same observed state.

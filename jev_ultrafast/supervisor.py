@@ -37,7 +37,8 @@ SAFE_CLICK_EN = re.compile(
     re.I,
 )
 SAFE_CLICK_ZH = re.compile(
-    r"^(同意|接受|確定|确定|關閉|关闭|知道了|繼續|继续|稍後|稍后|略過|略过|允許|允许|我知道|好的)",
+    r"^(同意|接受|確定|确定|關閉|关闭|知道了|繼續|继续|稍後|稍后|略過|略过|"
+    r"允許|允许|我知道|我同意|我接受|好的|全部接受|全部同意|全部允許|全部允许|朕知道)"
 )
 
 # Dangerous words that must never be auto-clicked (P0-1 Confused Deputy Protection)
@@ -96,21 +97,31 @@ def validate_recovery_action(diagnosis: dict[str, Any]) -> bool:
     return False
 
 
-def _settle(browser, max_timeout: float = 2.0) -> bool:
-    """Wait for document readyState and DOM to settle after recovery action."""
-    start = time.perf_counter()
-    while time.perf_counter() - start < max_timeout:
+def _settle(browser, max_timeout: float = 2.0, interval: float = 0.08) -> bool:
+    """Poll until DOM content stops changing (two consecutive identical reads)."""
+    prev, stable = None, 0
+    end = time.perf_counter() + max_timeout
+    while time.perf_counter() < end:
         try:
-            ready = browser.evaluate("document.readyState")
-            if ready in {"complete", "interactive"}:
-                time.sleep(0.02)
+            cur = browser.evaluate(
+                "(() => document.readyState + ':' + "
+                "(document.body ? document.body.innerHTML.length : 0))()"
+            )
+        except Exception as e:
+            logger.warning("_settle evaluate failed: %s", e)
+            return False
+        if not isinstance(cur, str):
+            logger.warning("_settle received non-string evaluate result: %r", cur)
+            return False
+        if cur.startswith("complete") and cur == prev:
+            stable += 1
+            if stable >= 2:
                 return True
-            if not isinstance(ready, str):
-                # Non-string response (e.g. test mocks returning dict/None)
-                return True
-        except Exception:
-            return True
-        time.sleep(0.02)
+        else:
+            stable = 0
+        prev = cur
+        time.sleep(interval)
+    logger.warning("_settle timed out after %.1fs", max_timeout)
     return False
 
 
@@ -321,7 +332,11 @@ class GLMSupervisor:
                 raise ValueError(f"Invalid verification response format: {parsed}")
 
             raw_satisfied = parsed.get("satisfied")
-            confidence = float(parsed.get("confidence", 0.0))
+            try:
+                confidence = float(parsed.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                logger.warning("Non-numeric confidence in audit: %r", parsed.get("confidence"))
+                confidence = 0.0
 
             if isinstance(raw_satisfied, bool):
                 satisfied = raw_satisfied
@@ -435,7 +450,14 @@ class GLMSupervisor:
                         if (!c.includes(text)) return false;
                         if (el.checkVisibility && !el.checkVisibility()) return false;
                         const r = el.getBoundingClientRect();
-                        return r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0;
+                        return (
+                            r.width > 0 &&
+                            r.height > 0 &&
+                            r.top >= 0 &&
+                            r.left >= 0 &&
+                            r.top < window.innerHeight &&
+                            r.left < window.innerWidth
+                        );
                     }});
                     if (!hits.length) return null;
                     hits.sort((a, b) => {{
@@ -473,7 +495,20 @@ class GLMSupervisor:
                 return False
 
             elif action_type == "RELOAD":
+                try:
+                    before = browser.evaluate("performance.timeOrigin")
+                except Exception:
+                    before = None
                 browser.call("Page.reload")
+                end = time.perf_counter() + 3.0
+                while time.perf_counter() < end:
+                    time.sleep(0.1)
+                    try:
+                        now = browser.evaluate("performance.timeOrigin")
+                    except Exception:
+                        continue
+                    if isinstance(now, (int, float)) and (before is None or now > before):
+                        break  # New document has been established
                 _settle(browser, max_timeout=3.0)
                 return True
 

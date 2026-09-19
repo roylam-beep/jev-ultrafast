@@ -307,6 +307,36 @@ def test_verify_goal_achievement_invalid_type_downgrades_to_none():
     supervisor.close()
 
 
+def test_verify_goal_achievement_non_numeric_confidence():
+    """P1: Verify non-numeric confidence (e.g. 'high') logs a warning and cleanly defaults to 0.0."""
+    supervisor = GLMSupervisor(api_key="valid-key")
+
+    mock_resp = Mock()
+    mock_resp.raise_for_status = Mock()
+    mock_resp.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "satisfied": True,
+                            "confidence": "high",
+                            "explanation": "Flights are visible.",
+                        }
+                    )
+                }
+            }
+        ]
+    }
+
+    with patch.object(supervisor.client, "post", return_value=mock_resp):
+        audit = supervisor.verify_goal_achievement("fake_b64", "Find flights")
+        assert audit["confidence"] == 0.0
+        assert audit["satisfied"] is None  # Downgraded because 0.0 < 0.70
+        assert audit["explanation"] == "Flights are visible."
+    supervisor.close()
+
+
 def test_apply_recovery_rejects_dangerous_action():
     supervisor = GLMSupervisor(api_key="valid-key")
     mock_browser = Mock()
@@ -332,6 +362,7 @@ def test_apply_recovery_rejects_dangerous_action():
 def test_apply_recovery_keypress_with_virtual_key_code():
     supervisor = GLMSupervisor(api_key="valid-key")
     mock_browser = Mock()
+    mock_browser.evaluate.return_value = "complete:1000"
 
     diagnosis = {
         "can_auto_recover": True,
@@ -363,7 +394,9 @@ def test_apply_recovery_keypress_with_virtual_key_code():
 def test_apply_recovery_scroll_dynamic_viewport():
     supervisor = GLMSupervisor(api_key="valid-key")
     mock_browser = Mock()
-    mock_browser.evaluate.return_value = {"x": 600, "y": 450}
+    mock_browser.evaluate.side_effect = (
+        lambda expr: "complete:1000" if "innerHTML" in expr else {"x": 600, "y": 450}
+    )
 
     diagnosis = {
         "can_auto_recover": True,
@@ -382,7 +415,9 @@ def test_apply_recovery_scroll_non_dict_fallback():
     """Verify SCROLL safely falls back to default center when evaluate returns non-dict."""
     supervisor = GLMSupervisor(api_key="valid-key")
     mock_browser = Mock()
-    mock_browser.evaluate.return_value = None
+    mock_browser.evaluate.side_effect = (
+        lambda expr: "complete:1000" if "innerHTML" in expr else None
+    )
 
     diagnosis = {
         "can_auto_recover": True,
@@ -400,7 +435,9 @@ def test_apply_recovery_scroll_non_dict_fallback():
 def test_apply_recovery_click_text_success():
     supervisor = GLMSupervisor(api_key="valid-key")
     mock_browser = Mock()
-    mock_browser.evaluate.return_value = {"x": 200, "y": 300}
+    mock_browser.evaluate.side_effect = (
+        lambda expr: "complete:1000" if "innerHTML" in expr else {"x": 200, "y": 300}
+    )
 
     diagnosis = {
         "can_auto_recover": True,
@@ -434,19 +471,54 @@ def test_apply_recovery_click_text_evaluate_none():
     supervisor.close()
 
 
-def test_settle_helper():
-    """Verify DOM settle helper checks readyState correctly."""
+def test_apply_recovery_reload_with_navigation_detection():
+    """Verify RELOAD waits for new document timeOrigin before DOM settling."""
+    supervisor = GLMSupervisor(api_key="valid-key")
     mock_browser = Mock()
-    mock_browser.evaluate.return_value = "complete"
-    assert _settle(mock_browser, max_timeout=0.1) is True
+    mock_browser.evaluate.side_effect = [
+        1000.0,          # before reload
+        2000.0,          # new document timeOrigin (> before)
+        "complete:5000",  # _settle read 1
+        "complete:5000",  # _settle read 2
+        "complete:5000",  # _settle read 3 -> stable >= 2
+    ]
 
-    # Loading to complete
-    mock_browser.evaluate.side_effect = ["loading", "complete"]
-    assert _settle(mock_browser, max_timeout=0.2) is True
+    diagnosis = {
+        "can_auto_recover": True,
+        "action_type": "RELOAD",
+    }
 
-    # Exception fallback
+    assert supervisor.apply_recovery(mock_browser, diagnosis) is True
+    mock_browser.call.assert_called_once_with("Page.reload")
+    supervisor.close()
+
+
+def test_settle_helper_dom_stability():
+    """Verify DOM settle helper requires 2 consecutive identical complete matches."""
+    mock_browser = Mock()
+
+    # 3 identical reads (2 consecutive matches) returns True
+    mock_browser.evaluate.side_effect = ["complete:1234", "complete:1234", "complete:1234"]
+    assert _settle(mock_browser, max_timeout=0.5, interval=0.01) is True
+
+    # Mutating reads reset stability counter
+    mock_browser.evaluate.side_effect = [
+        "loading:0",
+        "complete:100",
+        "complete:200",
+        "complete:200",
+        "complete:200",
+    ]
+    assert _settle(mock_browser, max_timeout=0.5, interval=0.01) is True
+
+    # CDP / evaluate exception returns False and logs
     mock_browser.evaluate.side_effect = RuntimeError("CDP disconnect")
-    assert _settle(mock_browser, max_timeout=0.1) is True
+    assert _settle(mock_browser, max_timeout=0.2, interval=0.01) is False
+
+    # Non-string evaluate returns False (no backdoor)
+    mock_browser.evaluate.side_effect = None
+    mock_browser.evaluate.return_value = {"x": 100}
+    assert _settle(mock_browser, max_timeout=0.2, interval=0.01) is False
 
 
 def test_validate_recovery_action_chinese_safe_patterns():
@@ -471,6 +543,14 @@ def test_validate_recovery_action_chinese_safe_patterns():
         "允许",
         "我知道了",
         "好的",
+        "全部接受",
+        "全部同意",
+        "全部允許",
+        "全部允许",
+        "我同意",
+        "我接受",
+        "朕知道",
+        "朕知道了",
     ]
     for text in chinese_safe:
         assert validate_recovery_action({"action_type": "CLICK_TEXT", "target_text": text}), f"Failed on: {text}"
@@ -492,6 +572,11 @@ def test_validate_recovery_action_chinese_dangerous_patterns_blocked():
         "確定下單",
         "确定下单",
         "確定註銷",
+        "全部接受並付款",
+        "全部同意刪除",
+        "我同意刪除帳戶",
+        "我接受付款",
+        "朕知道但要付款",
     ]
     for text in chinese_dangerous:
         assert not validate_recovery_action(
