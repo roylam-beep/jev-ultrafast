@@ -41,6 +41,25 @@
     }
     return null;
   };
+  // A record is a repeated block -- a product card, a listing row. Same tag and same first
+  // class as three or more of its siblings is what makes a block one of a repeating set.
+  // classList[0], not className: on an SVG element className is an SVGAnimatedString.
+  const sig = e => e.tagName + '.' + (e.classList[0] || '');
+  const chains = new Map();
+  // Every qualifying ancestor, innermost first. Suffix-shared, so each element is judged
+  // once per snapshot. Never cached on window: siblings and classes change between reads,
+  // and a stale chain would make the marker stop being a function of the current DOM.
+  const chainOf = e => {
+    if (chains.has(e)) return chains.get(e);
+    const p = e.parentElement;
+    let own = 0;
+    if (p) for (const s of p.children) if (sig(s) === sig(e)) own++;
+    const rest = p && p !== document.body ? chainOf(p) : [];
+    const chain = own >= 3 ? [e, ...rest] : rest;
+    chains.set(e, chain);
+    return chain;
+  };
+
   // A custom checkbox hides the real input and paints its label instead. The input still
   // holds the state and the identity, but it has no geometry to click -- the label is what a
   // person points at. Both the snapshot and the executor must agree on which box that is,
@@ -100,16 +119,45 @@
       if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
   }
-  const words=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
-  const range=document.createRange(); let node,length=0;
-  while ((node=walker.nextNode()) && length<6000) {
+  // Pass one: collect the visible text with the ancestor chain each segment sits in.
+  // Which ancestor is the record cannot be decided here -- "holds more than one line" is
+  // only knowable once the whole walk is done.
+  const segments=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+  const range=document.createRange(); let node;
+  while ((node=walker.nextNode()) && segments.length<400) {
     const value=node.textContent.trim(), parent=node.parentElement;
     if (!value || !parent || parent.closest('script,style,noscript,template') || !visible(parent)) continue;
     range.selectNodeContents(node); const r=range.getBoundingClientRect();
-    if (r.width>0 && r.height>0 && r.bottom>0 && r.top<innerHeight && r.right>0 && r.left<innerWidth) {
-      words.push(value); length+=value.length;
+    if (r.width>0 && r.height>0 && r.bottom>0 && r.top<innerHeight && r.right>0 && r.left<innerWidth)
+      segments.push({value, chain: parent===document.body ? [] : chainOf(parent)});
+  }
+  // Pass two: a one-line container is a label, not a record. Falling through to the next
+  // qualifying ancestor is what folds a stray tag back into the card it decorates.
+  const held=new Map();
+  for (const s of segments) for (const c of s.chain) held.set(c, (held.get(c)||0)+1);
+  const holder = s => s.chain.find(c => held.get(c)>=2) || null;
+  // Pass three: emit the flat text with a record marker per group, and the same grouping
+  // as data. Budget is spent per whole segment so a value is never cut mid-string.
+  const words=[], grouped=new Map(); let length=0, current=null;
+  for (const s of segments) {
+    const box=holder(s);
+    if (box!==current) {
+      const open = box ? '\u27e6'+identity(box)+'\u27e7' : (current ? '\u27e6\u27e7' : null);
+      if (open!==null) {
+        if (length+open.length+1>6000) break;
+        words.push(open); length+=open.length+1;
+      }
+      current=box;
+    }
+    if (length+s.value.length+1>6000) break;
+    words.push(s.value); length+=s.value.length+1;
+    if (box) {
+      const id=identity(box);
+      if (!grouped.has(id)) grouped.set(id, []);
+      grouped.get(id).push(s.value);
     }
   }
+  const records=[...grouped.entries()].map(([node2,lines])=>({node:node2,lines}));
   const text=words.join('\n').slice(0,6000), height=document.documentElement.scrollHeight;
   const page_key=cache.pageKey(), guards={};
   for (const a of actions) if (!(a.node in guards)) guards[a.node]=cache.guard(cache.nodes.get(a.node));
@@ -123,6 +171,6 @@
   if (scrollY+innerHeight<height-2) actions.push({id:'scroll_down',kind:'scroll',label:'Scroll down',delta:560});
   if (scrollY>0) actions.push({id:'scroll_up',kind:'scroll',label:'Scroll up',delta:-560});
   actions.push({id:'wait',kind:'wait',label:'Wait for the page to update'});
-  return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,
+  return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,records,
     scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions};
 })()

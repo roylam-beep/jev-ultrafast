@@ -705,3 +705,102 @@ def test_the_policy_is_told_where_it_is_and_what_each_step_did(monkeypatch):
     scroll = sent["state"]["page"]["scroll"]
     assert scroll == {"y": 560, "height": 4200, "viewport_height": 780}
     assert sent["state"]["recent_actions"][0]["url"] == "https://example.test/?section=105"
+
+
+MARK_OPEN = "⟦"
+MARK_CLOSE = "⟧"
+
+
+def marked(*groups):
+    """Page text as snapshot.js now emits it: a marker line, then that record's lines."""
+    out = []
+    for node, lines in groups:
+        out.append(f"{MARK_OPEN}{node}{MARK_CLOSE}" if node else MARK_OPEN + MARK_CLOSE)
+        out.extend(lines)
+    return "\n".join(out)
+
+
+def test_record_markers_move_the_fingerprint_but_not_progress():
+    """Grouping is part of the observation, so it must age one out -- but it is not progress."""
+    from jev_ultrafast.browser import fingerprint, progress_key
+
+    before = page()
+    before["text"] = marked((7, ["Widget A", "1,100"]), (8, ["Widget B", "2,200"]))
+    regrouped = deepcopy(before)
+    regrouped["text"] = marked((7, ["Widget A", "1,100", "Widget B", "2,200"]))
+
+    assert fingerprint(regrouped) != fingerprint(before)
+    assert progress_key(regrouped) == progress_key(before)
+
+
+def test_records_need_no_place_in_the_fingerprint():
+    """records is a pure view of text, so text alone carries the staleness signal.
+
+    If this ever stops holding, records must join the marker -- otherwise the page could be
+    regrouped while fresh() still reports the old observation as current.
+    """
+    from jev_ultrafast.browser import fingerprint
+
+    base = page()
+    base["text"] = marked((7, ["Widget A", "1,100"]))
+    with_field = deepcopy(base)
+    with_field["records"] = [{"node": 7, "lines": ["Widget A", "1,100"]}]
+    assert fingerprint(with_field) == fingerprint(base)
+
+    moved = deepcopy(base)
+    moved["text"] = marked((9, ["Widget A", "1,100"]))
+    assert fingerprint(moved) != fingerprint(base)
+
+
+def test_the_text_helper_still_sees_a_bounded_page():
+    long_text = marked((7, ["x" * 4000]), (8, ["y" * 4000]))
+    context = model.field_context("goal", page()["actions"][0], {"title": "t", "text": long_text}, [])
+    assert len(context["page"]["text"]) == 6000
+
+
+def test_markers_do_not_break_the_independent_flight_check():
+    """The only real parser of page text splits on lines; markers sit between them."""
+    from examples.flights import verify
+
+    actual = {
+        "url": "https://www.google.com/travel/flights/search?tfs=example",
+        "text": marked((11, ["Track prices from Zürich to London departing 2026-09-20"])),
+        "actions": [
+            {"label": k, "value": v}
+            for k, v in [
+                ("Change ticket type. One way", "One way"),
+                ("Where from?", "Zürich"),
+                ("Where to?", "London"),
+                ("Departure", "Sun, Sep 20"),
+                ("Nonstop flight on Sunday, September 20. Select flight", ""),
+            ]
+        ],
+    }
+    assert verify(actual)["passed"]
+
+
+def test_the_model_number_rule_reaches_every_head(monkeypatch):
+    """NEXT_ACTION rides in each head's instructions, so both protocols carry the rule."""
+    sent = {}
+
+    def post(_url, _key, body):
+        sent.update(body)
+        return {
+            "model": "test",
+            "answers": {
+                "operation": choice(body["questions"]["operation"]["criteria"], "CLICK"),
+                "click_target": choice(["1", "2"], "2"),
+                "type_text_target": choice(["1"], "1"),
+            },
+        }
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setenv("TYPESAFE_ENDPOINT", model.DEFAULT_TYPESAFE_CHOICE_ENDPOINT)
+    monkeypatch.setattr(model, "post_json", post)
+    model.choose(page(), "Find an S26", [])
+
+    for name, question in sent["questions"].items():
+        rules = question["instructions"]["rules"]
+        text = rules if isinstance(rules, str) else "\n".join(rules)
+        assert "S26 Ultra" in text, name
+        assert MARK_OPEN in text, f"{name} does not explain the record marker"

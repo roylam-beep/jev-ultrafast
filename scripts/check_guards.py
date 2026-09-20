@@ -192,6 +192,62 @@ def main():
         assert wrapped["checked"] == "true", wrapped
         passed.append("a checkbox wrapped in a button reports the state the user sees")
 
+        # A name and a price mean nothing apart. Group repeated blocks so a reader can tell
+        # which lines describe one item -- and prove the grouping is stable enough to act on.
+        browser.evaluate("document.body.innerHTML=" + repr("""
+          <ul id="nav"><li>Home</li><li>Deals</li><li>Help</li><li>Cart</li><li>More</li></ul>
+          <div id="grid">
+            <div class="card"><span class="tag">new</span><p>Widget A</p><p>1,100</p></div>
+            <div class="card"><span class="tag">hot</span><p>Widget B</p><p>2,200</p></div>
+            <div class="card"><span class="tag">new</span><p>Widget C</p><p>3,300</p></div>
+            <div class="card"><span class="tag">new</span><p>Widget D</p><p>4,400</p></div>
+          </div>
+        """))
+        page = browser.observe(screenshot=False)
+        records = page["records"]
+        named = {}
+        for record in records:
+            for line in record["lines"]:
+                if line.startswith("Widget "):
+                    named[line] = record["lines"]
+        assert len(named) == 4, f"expected one record per card, got {len(named)}: {records}"
+        for name, lines in named.items():
+            price = {"Widget A": "1,100", "Widget B": "2,200", "Widget C": "3,300", "Widget D": "4,400"}[name]
+            assert price in lines, f"{name} lost its price: {lines}"
+        passed.append("a name and its price land in the same record")
+
+        # The one-word tag is a label, not a record; it must fold into the card it decorates.
+        assert all("new" not in r["lines"] or any(x.startswith("Widget") for x in r["lines"])
+                   for r in records), records
+        assert any("new" in lines for lines in named.values()), named
+        passed.append("a one-line container folds into the record around it")
+
+        marked = [ln for ln in page["text"].split("\n") if ln.startswith("\u27e6")]
+        assert not any(ln in ("Home", "Deals", "Help") for r in records for ln in r["lines"]), records
+        passed.append("a class-less repeated list does not become records")
+
+        # The flat text and the structured field must be the same grouping, or a reader that
+        # trusts one and a reader that trusts the other will disagree.
+        rebuilt, node_id = {}, None
+        for line in page["text"].split("\n"):
+            if line.startswith("\u27e6") and line.endswith("\u27e7"):
+                inner = line[1:-1]
+                node_id = int(inner) if inner else None
+                continue
+            if node_id is not None:
+                rebuilt.setdefault(node_id, []).append(line)
+        assert rebuilt == {r["node"]: r["lines"] for r in records}, (rebuilt, records)
+        assert marked, "no record markers were emitted into the text"
+        assert len(page["text"]) <= 6000
+        passed.append("the markers in the text rebuild exactly the records field")
+
+        # The ids ride inside the freshness marker, so unstable numbering would turn every
+        # decision into a StalePage. Same DOM, read twice.
+        again = browser.observe(screenshot=False)
+        assert [r["node"] for r in again["records"]] == [r["node"] for r in records], (again["records"], records)
+        assert browser.fresh(page), "a second read of an unchanged page invalidated the first"
+        passed.append("record ids survive a second observation of the same page")
+
         browser.call("Page.navigate", url="about:blank")
         assert not browser.fresh(page, field)
         passed.append("navigation invalidates the old document")

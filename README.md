@@ -131,7 +131,7 @@ To strictly defend against prompt injection and confused deputy attacks while re
 
 - **One request per decision cycle.** Operation and target heads share the same observed state.
 - **No screenshots in the default agent loop.** Jev consumes structured state. The inspector opts into screenshots; the video uses a separate continuous screencast.
-- **One browser call per snapshot.** Read visible controls, their names, values, and text atomically. Keep references to the actual DOM nodes.
+- **One browser call per snapshot.** Read visible controls, their names, values, and text atomically. Keep references to the actual DOM nodes. Visible text is grouped into records by sibling similarity, so a name and its price arrive stated as belonging to the same item rather than as two adjacent lines.
 - **Validate the selected target.** Clicks check the document, form values, target, and nearby context. Animation alone does not force another prediction. Resolve current geometry and reject covered controls before input.
 - **Wait for useful state.** After typing into a combobox, wait for visible suggestions, capped at 200 ms. Other interactions get at most two animation frames or 50 ms. These reads happen after execution is logged.
 - **Spend a WAIT on a signal, not a sleep.** A `WAIT` costs a decision, so it returns the moment the session's network goes quiet (250 ms with nothing in flight, 2 s ceiling) instead of sleeping a fixed slice and paying another decision to look again. The Network domain is enabled once per session, so a wait adds no protocol calls of its own.
