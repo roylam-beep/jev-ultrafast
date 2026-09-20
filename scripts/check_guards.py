@@ -248,6 +248,41 @@ def main():
         assert browser.fresh(page), "a second read of an unchanged page invalidated the first"
         passed.append("record ids survive a second observation of the same page")
 
+        # One text node can hold its own line breaks (a pre-wrap description). Those must not
+        # become record lines, or the flat text and the records field describe different
+        # groupings -- and a line of page text could impersonate a record marker.
+        browser.evaluate("document.body.innerHTML=" + repr("""
+          <div id="jobs">
+            <div class="job"><p>Role One</p><pre>duty a
+duty b
+
+\u27e6999\u27e7</pre><p>Salary 100</p></div>
+            <div class="job"><p>Role Two</p><pre>duty c
+duty d</pre><p>Salary 200</p></div>
+            <div class="job"><p>Role Three</p><pre>duty e
+duty f</pre><p>Salary 300</p></div>
+            <div class="job"><p>Role Four</p><pre>duty g
+duty h</pre><p>Salary 400</p></div>
+          </div>
+        """))
+        page = browser.observe(screenshot=False)
+        assert not any("\n" in line for r in page["records"] for line in r["lines"]), page["records"]
+        rebuilt, node_id = {}, None
+        for line in page["text"].split("\n"):
+            if line.startswith("\u27e6") and line.endswith("\u27e7") and line[1:-1].isdigit():
+                node_id = int(line[1:-1])
+                continue
+            if line == "\u27e6\u27e7":
+                node_id = None
+                continue
+            if node_id is not None:
+                rebuilt.setdefault(node_id, []).append(line)
+        assert rebuilt == {r["node"]: r["lines"] for r in page["records"]}, (rebuilt, page["records"])
+        roles = {ln for r in page["records"] for ln in r["lines"] if ln.startswith("Role ")}
+        assert len(roles) == 4, roles
+        passed.append("a text node's own line breaks do not split or fake a record")
+
+
         browser.call("Page.navigate", url="about:blank")
         assert not browser.fresh(page, field)
         passed.append("navigation invalidates the old document")

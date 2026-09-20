@@ -125,7 +125,10 @@
   const segments=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
   const range=document.createRange(); let node;
   while ((node=walker.nextNode()) && segments.length<400) {
-    const value=node.textContent.trim(), parent=node.parentElement;
+    // Collapse newlines inside one node: a pre-wrap job description is a single text node
+    // whose own line breaks would otherwise become record lines, so the flat text and the
+    // records field would disagree -- and a line of page text could impersonate a marker.
+    const value=node.textContent.trim().replace(/\s*\n\s*/g,' '), parent=node.parentElement;
     if (!value || !parent || parent.closest('script,style,noscript,template') || !visible(parent)) continue;
     range.selectNodeContents(node); const r=range.getBoundingClientRect();
     if (r.width>0 && r.height>0 && r.bottom>0 && r.top<innerHeight && r.right>0 && r.left<innerWidth)
