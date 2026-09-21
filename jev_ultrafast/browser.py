@@ -23,6 +23,8 @@ MUTATING_EVALUATIONS = {"select": "Dropdown", "scroll": "Scroll"}
 # return well inside the loop's budget when the page never settles.
 WAIT_BUDGET = 2.0
 WAIT_IDLE_MS = 250
+# A history entry is already fetched, so going back is a load, not a round trip to a server.
+NAVIGATION_BUDGET = 10.0
 # snapshot.js guard() puts the surrounding scope's text last. Everything before it is the
 # element's own identity and state; that prefix is what survives a page that animates itself.
 GUARD_SCOPE_TEXT = 13
@@ -76,6 +78,9 @@ class Browser:
                 if self.evaluate("document.readyState") == "complete":
                     break
                 time.sleep(0.02)
+            # Where this run started. BACK may return to a page the agent opened itself,
+            # never past the start into about:blank, which offers nothing to act on.
+            self.history_floor = self.call("Page.getNavigationHistory")["currentIndex"]
         except Exception:
             self.close()  # A session that never opened still owns a tab and a subscription.
             raise
@@ -125,7 +130,12 @@ class Browser:
         for attempt in range(10):
             try:
                 return browser_operation(
-                    {"operation": "observe", "session": self.session, "screenshot": screenshot}
+                    {
+                        "operation": "observe",
+                        "session": self.session,
+                        "screenshot": screenshot,
+                        "history_floor": getattr(self, "history_floor", None),
+                    }
                 )
             except StalePage:
                 if attempt == 9:
@@ -244,6 +254,19 @@ def browser_operation(request):
         if kind == "scroll":
             # CDP drops mouseWheel on a background target, and the agent owns one.
             evaluate(scroll_expression(action["delta"]))
+        elif kind == "back":
+            # Opening a page is only half a detour. Without the return trip the agent that
+            # steps into a detail page to read one field has no way back to the list it came
+            # from, and a task that spans several pages cannot be finished at all.
+            call("Page.navigateToHistoryEntry", entryId=action["entry"])
+            deadline = time.perf_counter() + NAVIGATION_BUDGET
+            while time.perf_counter() < deadline:
+                try:
+                    if evaluate("document.readyState") == "complete":
+                        break
+                except (RuntimeError, StalePage):
+                    pass  # The old document is going away; that is the navigation working.
+                time.sleep(0.03)
         elif kind != "wait":
             if type(action["node"]) is not int:
                 raise ValueError("Invalid observed node")
@@ -318,6 +341,15 @@ def browser_operation(request):
     info = evaluate(READ_STATE)
     if info is None:
         raise StalePage("Document is navigating")
+    floor = request.get("history_floor")
+    if floor is not None:
+        history = call("Page.getNavigationHistory")
+        if history["currentIndex"] > floor:
+            previous = history["entries"][history["currentIndex"] - 1]
+            info["actions"].append({
+                "id": "back", "kind": "back", "entry": previous["id"],
+                "label": "Go back to the previous page",
+            })
     info["fingerprint"] = fingerprint(info)
     info["progress_key"] = progress_key(info)
     if request.get("screenshot", True):

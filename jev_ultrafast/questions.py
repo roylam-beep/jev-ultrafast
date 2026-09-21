@@ -19,6 +19,9 @@ Recent WAIT actions are not evidence of loading. Prefer a useful visible control
 A recent action of kind "rejected" means that target could not be operated at all -- covered by
 an overlay, disabled, or gone. Never choose that target again; take a different element, a
 different operation, or a route that dismisses whatever covers it.
+When the goal needs a detail the list does not show -- a colour, a spec, a stock status --
+open one item, read it, then BACK to the list and continue with the next one. BACK returns to
+the page you came from; it is offered only when there is one. Do not wander on a detail page.
 DONE requires visible evidence that ALL requirements are satisfied. If asked to open a result,
 a matching link is not enough. BLOCKED means no supported operation can make progress."""
 

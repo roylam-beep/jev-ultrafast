@@ -1,5 +1,6 @@
 """Local-browser freshness/execution regressions. No model calls or external websites."""
 
+import time
 from urllib.parse import quote
 
 from jev_ultrafast.browser import Browser, StalePage
@@ -282,6 +283,33 @@ duty h</pre><p>Salary 400</p></div>
         assert len(roles) == 4, roles
         passed.append("a text node's own line breaks do not split or fake a record")
 
+
+        # A detour is only useful if it returns. BACK appears once the agent has opened a
+        # page of its own, and never offers to step back past where the run started.
+        start = browser.observe(screenshot=False)
+        assert not any(a["kind"] == "back" for a in start["actions"]), "BACK offered at the start"
+        # Chrome refuses a data: URL navigating to another data: URL, so drive it over CDP --
+        # what matters here is that a second history entry exists, not how it got there.
+        browser.call("Page.navigate", url="data:text/html,"
+                     + quote("<title>Detail</title><p id=spec>Colour: orange</p>"))
+        for _ in range(100):
+            try:
+                if browser.evaluate("!!document.querySelector('#spec')"):
+                    break
+            except (RuntimeError, StalePage):
+                pass
+            time.sleep(0.03)
+        detail = browser.observe(screenshot=False)
+        assert "Colour: orange" in detail["text"], detail["text"][:120]
+        back = next((a for a in detail["actions"] if a["kind"] == "back"), None)
+        assert back is not None, "no way back from a page the agent opened"
+        passed.append("a page the agent opened offers a way back")
+
+        browser.act(back, detail)
+        returned = browser.observe(screenshot=False)
+        assert returned["url"] == start["url"], (returned["url"][:80], start["url"][:80])
+        assert not any(a["kind"] == "back" for a in returned["actions"]), "BACK would leave the run"
+        passed.append("going back lands on the page the detour started from")
 
         browser.call("Page.navigate", url="about:blank")
         assert not browser.fresh(page, field)
